@@ -1,0 +1,20 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Texte du livre et sources de travail (non publiés)
+.book/
+.nbsrc/
+.ed1/
+
+# Sorties temporaires
+outputs/
+*.log
+.DS_Store
