@@ -1,0 +1,15 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ddia"
+version = "0.1.0"
+description = "Outils pédagogiques accompagnant la lecture de Designing Data-Intensive Applications (Kleppmann)"
+requires-python = ">=3.8"
+
+[tool.setuptools]
+packages = ["ddia"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

@@ -1,0 +1,10 @@
+numpy
+pandas
+matplotlib
+networkx
+jupyter
+ipykernel
+nbformat
+nbconvert
+jupytext
+pytest
