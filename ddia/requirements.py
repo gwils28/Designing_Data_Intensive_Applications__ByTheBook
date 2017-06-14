@@ -118,3 +118,81 @@ class _Timelines:
 
     def timeline(self, user: int) -> List[Tuple[float, int, str]]:
         raise NotImplementedError
+
+
+class PullTimelines(_Timelines):
+    """Fan-out à la lecture : on stocke chaque message une fois, on fusionne à la lecture."""
+
+    def post(self, user, t, text=""):
+        self.posts[user].appendleft((t, user, text))
+        self.write_ops += 1
+
+    def timeline(self, user):
+        lists = []
+        for f in self.following[user]:
+            lists.append(self.posts[f])
+            self.read_ops += 1
+        return heapq.nlargest(self.k, (m for lst in lists for m in lst))
+
+
+class PushTimelines(_Timelines):
+    """Fan-out à l'écriture : chaque message est livré dans la boîte de chaque abonné."""
+
+    def __init__(self, *args, **kw):
+        super().__init__(*args, **kw)
+        self.cache: List[deque] = [deque(maxlen=self.k) for _ in range(len(self.posts))]
+
+    def post(self, user, t, text=""):
+        self.posts[user].appendleft((t, user, text))
+        self.write_ops += 1
+        for f in self.followers[user]:
+            self.cache[f].appendleft((t, user, text))
+            self.write_ops += 1
+
+    def timeline(self, user):
+        self.read_ops += 1
+        return list(self.cache[user])
+
+
+class HybridTimelines(PushTimelines):
+    """Hybride : diffusion pour les comptes ordinaires, fusion à la lecture pour les célébrités."""
+
+    def __init__(self, follower, followee, n_users, k=50, threshold=1000):
+        super().__init__(follower, followee, n_users, k=k)
+        self.celebrity = [len(fs) >= threshold for fs in self.followers]
+        self.celebs_followed = [[f for f in fl if self.celebrity[f]] for fl in self.following]
+
+    def post(self, user, t, text=""):
+        if self.celebrity[user]:
+            self.posts[user].appendleft((t, user, text))
+            self.write_ops += 1
+        else:
+            super().post(user, t, text)
+
+    def timeline(self, user):
+        self.read_ops += 1
+        parts = [self.cache[user]]
+        for c in self.celebs_followed[user]:
+            parts.append(self.posts[c])
+            self.read_ops += 1
+        return heapq.nlargest(self.k, (m for lst in parts for m in lst))
+
+
+# =====================================================================================
+# 2. Performance : temps de réponse et percentiles
+# =====================================================================================
+
+
+def synthetic_response_times(n: int, seed: int = 0, median_ms: float = 40.0, sigma: float = 0.45,
+                             p_slow: float = 0.015, slow_ms: Tuple[float, float] = (300.0, 1500.0)) -> np.ndarray:
+    """Temps de réponse (ms) réalistes : corps log-normal + petite fraction de requêtes lentes.
+
+    Les requêtes lentes modélisent les aléas du livre (pause du ramasse-miettes,
+    retransmission TCP, défaut de page...) : avec probabilité `p_slow`, on ajoute un délai
+    uniforme dans `slow_ms`.
+    """
+    rng = np.random.default_rng(seed)
+    x = rng.lognormal(math.log(median_ms), sigma, n)
+    slow = rng.random(n) < p_slow
+    x[slow] += rng.uniform(slow_ms[0], slow_ms[1], slow.sum())
+    return x
