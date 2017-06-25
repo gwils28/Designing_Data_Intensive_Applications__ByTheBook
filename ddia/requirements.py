@@ -196,3 +196,111 @@ def synthetic_response_times(n: int, seed: int = 0, median_ms: float = 40.0, sig
     slow = rng.random(n) < p_slow
     x[slow] += rng.uniform(slow_ms[0], slow_ms[1], slow.sum())
     return x
+
+
+def percentile(values: Iterable[float], q: float) -> float:
+    """Percentile par la méthode du rang le plus proche (nearest rank) : la plus petite
+    valeur v telle qu'au moins q % des observations soient <= v."""
+    v = np.sort(np.asarray(list(values) if not isinstance(values, np.ndarray) else values, dtype=float))
+    if v.size == 0:
+        raise ValueError("aucune valeur")
+    rank = max(1, int(math.ceil(q / 100.0 * v.size)))
+    return float(v[min(rank, v.size) - 1])
+
+
+class LogLinearHistogram:
+    """Histogramme log-linéaire à la HdrHistogram (version simplifiée).
+
+    Chaque puissance de deux [2^e, 2^(e+1)) est découpée en 2^sub_bits seaux de même
+    largeur : l'erreur relative sur une valeur est donc bornée par 2^-sub_bits (et par
+    2^-(sub_bits+1) en restituant le milieu du seau). La mémoire ne dépend que de la plage
+    dynamique, pas du nombre de valeurs. Deux histogrammes de même paramétrage se
+    **fusionnent** exactement en additionnant leurs compteurs.
+
+    unit : résolution (ex. 1e-3 si les valeurs sont en ms et qu'on veut la µs).
+    """
+
+    def __init__(self, sub_bits: int = 5, unit: float = 1e-3):
+        self.sub_bits = sub_bits
+        self.unit = unit
+        self.counts: Dict[int, int] = {}
+        self.total = 0
+        self._sum = 0.0
+
+    # --- indexation -------------------------------------------------------------
+    def _index(self, x: np.ndarray) -> np.ndarray:
+        s = 1 << self.sub_bits
+        u = np.maximum(np.asarray(x, dtype=float) / self.unit, 1.0)
+        e = np.floor(np.log2(u)).astype(np.int64)
+        frac = u / np.exp2(e) - 1.0
+        sub = np.minimum((frac * s).astype(np.int64), s - 1)
+        return e * s + sub
+
+    def bucket_bounds(self, idx: int) -> Tuple[float, float]:
+        s = 1 << self.sub_bits
+        e, sub = divmod(int(idx), s)
+        lo = 2.0 ** e * (1 + sub / s)
+        hi = 2.0 ** e * (1 + (sub + 1) / s)
+        return lo * self.unit, hi * self.unit
+
+    def bucket_value(self, idx: int) -> float:
+        lo, hi = self.bucket_bounds(idx)
+        return (lo + hi) / 2
+
+    # --- enregistrement ---------------------------------------------------------
+    def record(self, value: float, count: int = 1) -> None:
+        i = int(self._index(np.array([value]))[0])
+        self.counts[i] = self.counts.get(i, 0) + count
+        self.total += count
+        self._sum += value * count
+
+    def record_many(self, values) -> None:
+        values = np.asarray(values, dtype=float)
+        if values.size == 0:
+            return
+        idx, cnt = np.unique(self._index(values), return_counts=True)
+        for i, c in zip(idx.tolist(), cnt.tolist()):
+            self.counts[i] = self.counts.get(i, 0) + c
+        self.total += int(values.size)
+        self._sum += float(values.sum())
+
+    def merge(self, other: "LogLinearHistogram") -> "LogLinearHistogram":
+        """Ajoute les compteurs de `other` (même sub_bits et unit) à cet histogramme."""
+        if (other.sub_bits, other.unit) != (self.sub_bits, self.unit):
+            raise ValueError("histogrammes de paramétrages différents")
+        for i, c in other.counts.items():
+            self.counts[i] = self.counts.get(i, 0) + c
+        self.total += other.total
+        self._sum += other._sum
+        return self
+
+    @classmethod
+    def merged(cls, hists: Sequence["LogLinearHistogram"]) -> "LogLinearHistogram":
+        h0 = hists[0]
+        out = cls(h0.sub_bits, h0.unit)
+        for h in hists:
+            out.merge(h)
+        return out
+
+    # --- requêtes ---------------------------------------------------------------
+    def percentile(self, q: float) -> float:
+        if self.total == 0:
+            raise ValueError("histogramme vide")
+        target = max(1, int(math.ceil(q / 100.0 * self.total)))
+        acc = 0
+        for i in sorted(self.counts):
+            acc += self.counts[i]
+            if acc >= target:
+                return self.bucket_value(i)
+        return self.bucket_value(max(self.counts))
+
+    def mean(self) -> float:
+        return self._sum / self.total
+
+    @property
+    def n_buckets(self) -> int:
+        return len(self.counts)
+
+    def max_relative_error(self) -> float:
+        """Borne de l'erreur relative en restituant le milieu des seaux."""
+        return 2.0 ** -(self.sub_bits + 1)
