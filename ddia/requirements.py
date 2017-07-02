@@ -304,3 +304,102 @@ class LogLinearHistogram:
     def max_relative_error(self) -> float:
         """Borne de l'erreur relative en restituant le milieu des seaux."""
         return 2.0 ** -(self.sub_bits + 1)
+
+
+class RollingPercentiles:
+    """Percentiles sur une fenêtre glissante : un histogramme par tranche de temps.
+
+    `add(t, v)` range v dans la tranche floor(t / slot) ; `percentile(t, q)` fusionne les
+    `window` dernières tranches (celle de t comprise). Les tranches trop vieilles sont
+    oubliées : la mémoire reste bornée.
+    """
+
+    def __init__(self, window: int = 10, slot: float = 60.0, sub_bits: int = 5, unit: float = 1e-3):
+        self.window, self.slot = window, slot
+        self.sub_bits, self.unit = sub_bits, unit
+        self.slots: Dict[int, LogLinearHistogram] = {}
+
+    def add_many(self, t, values) -> None:
+        t = np.asarray(t, dtype=float)
+        values = np.asarray(values, dtype=float)
+        k = np.floor(t / self.slot).astype(int)
+        for s in np.unique(k):
+            h = self.slots.setdefault(int(s), LogLinearHistogram(self.sub_bits, self.unit))
+            h.record_many(values[k == s])
+
+    def add(self, t: float, v: float) -> None:
+        self.add_many([t], [v])
+
+    def percentile(self, t: float, q: float) -> float:
+        now = int(math.floor(t / self.slot))
+        for s in [s for s in self.slots if s <= now - self.window]:
+            del self.slots[s]
+        hs = [h for s, h in self.slots.items() if now - self.window < s <= now]
+        return LogLinearHistogram.merged(hs).percentile(q)
+
+
+def p_any_slow(p: float, n) -> np.ndarray:
+    """Probabilité qu'au moins un de n appels indépendants soit lent : 1 - (1 - p)^n."""
+    return 1.0 - (1.0 - p) ** np.asarray(n, dtype=float)
+
+
+def fanout_response_times(samples: np.ndarray, n: int, n_requests: int, seed: int = 0) -> np.ndarray:
+    """Temps de réponse d'une requête qui attend n appels parallèles : max de n tirages."""
+    rng = np.random.default_rng(seed)
+    idx = rng.integers(0, samples.size, size=(n_requests, n))
+    return samples[idx].max(axis=1)
+
+
+def per_call_quantile_for(q_global: float, n: int) -> float:
+    """Quantile (en fraction) qu'un appel doit garantir pour que la requête qui en
+    attend n respecte le quantile global : q_appel = q_global^(1/n)."""
+    return q_global ** (1.0 / n)
+
+
+# =====================================================================================
+# 3. Files d'attente
+# =====================================================================================
+
+
+def poisson_arrivals(rate: float, n: int, seed: int = 0, start: float = 0.0) -> np.ndarray:
+    """n instants d'arrivée d'un processus de Poisson de taux `rate`."""
+    rng = np.random.default_rng(seed)
+    return start + np.cumsum(rng.exponential(1.0 / rate, n))
+
+
+def simulate_fifo(arrivals: np.ndarray, services: np.ndarray, c: int = 1) -> Tuple[np.ndarray, np.ndarray]:
+    """File FIFO à c serveurs identiques. Renvoie (début de service, fin de service).
+
+    Pour c = 1, c'est la récurrence de Lindley : début_i = max(arrivée_i, fin_{i-1}).
+    Temps de réponse = fin - arrivée ; attente en file = début - arrivée.
+    Les requêtes sont servies dans l'ordre des arrivées (les tableaux n'ont pas besoin
+    d'être triés ; les résultats sont rendus dans l'ordre d'origine).
+    """
+    arrivals = np.asarray(arrivals, dtype=float)
+    services = np.asarray(services, dtype=float)
+    if arrivals.size > 1 and np.any(np.diff(arrivals) < 0):
+        order = np.argsort(arrivals, kind="stable")
+        st, en = simulate_fifo(arrivals[order], services[order], c)
+        start, end = np.empty_like(st), np.empty_like(en)
+        start[order], end[order] = st, en
+        return start, end
+    n = arrivals.size
+    start = np.empty(n)
+    end = np.empty(n)
+    if c == 1:
+        free = -math.inf
+        for i in range(n):
+            s = arrivals[i] if arrivals[i] > free else free
+            start[i] = s
+            free = s + services[i]
+            end[i] = free
+        return start, end
+    servers = [0.0] * c
+    heapq.heapify(servers)
+    for i in range(n):
+        free = heapq.heappop(servers)
+        s = max(arrivals[i], free)
+        start[i] = s
+        end[i] = s + services[i]
+        heapq.heappush(servers, end[i])
+    return start, end
