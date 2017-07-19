@@ -477,3 +477,74 @@ def expected_failures(n: int, afr: float, days: float = 1.0) -> float:
     """Nombre moyen de pannes dans un parc de n composants pendant `days` jours."""
     lam = -math.log(1.0 - afr) / 365.0
     return n * lam * days
+
+
+def poisson_pmf(k, mean: float) -> np.ndarray:
+    k = np.asarray(k)
+    logp = -mean + k * np.log(mean) - np.array([math.lgamma(int(x) + 1) for x in np.atleast_1d(k)])
+    return np.exp(logp).reshape(k.shape)
+
+
+def mttdl_hours(afr: float, r: int, rebuild_hours: float) -> float:
+    """Durée moyenne avant perte de données d'un groupe de r copies (pannes indépendantes).
+
+    Approximation (reconstruction courte devant le MTTF) : il y a perte quand les r
+    copies sont en panne en même temps, c'est-à-dire quand, après une première panne
+    (taux r lam), chacune des r - 1 autres copies tombe dans la fenêtre T qui suit
+    (probabilité ~ lam T chacune). D'où un taux r lam^r T^(r-1) et
+    MTTDL = 1 / (r lam^r T^(r-1)). Pour r = 2 : MTTF^2 / (2 T), la formule du RAID 1.
+    """
+    lam = 1.0 / mttf_hours_from_afr(afr)
+    return 1.0 / (r * lam ** r * rebuild_hours ** (r - 1))
+
+
+def p_loss_per_year(afr: float, r: int, rebuild_hours: float, n_groups: int = 1) -> float:
+    """Probabilité de perdre au moins un groupe (sur n_groups) en un an."""
+    rate = n_groups * HOURS_PER_YEAR / mttdl_hours(afr, r, rebuild_hours)
+    return 1.0 - math.exp(-rate)
+
+
+def simulate_data_loss(r: int, afr: float, rebuild_hours: float, years: float, n_groups: int,
+                       seed: int = 0, shock_per_year: float = 0.0) -> np.ndarray:
+    """Simulation Monte-Carlo de groupes de r copies (une par disque).
+
+    Chaque disque sain tombe en panne au taux constant lam (déduit de l'AFR) ; un disque
+    en panne est remplacé et reconstruit en `rebuild_hours`. `shock_per_year` ajoute des
+    pannes **corrélées** : à ce taux, un choc commun (rack, alimentation, firmware...)
+    détruit toutes les copies du groupe d'un coup.
+
+    Renvoie, pour chaque groupe, l'instant (heures) de la première perte de données, ou
+    inf s'il n'y en a pas eu sur l'horizon.
+    """
+    rng = np.random.default_rng(seed)
+    lam = 1.0 / mttf_hours_from_afr(afr)
+    shock = shock_per_year / HOURS_PER_YEAR
+    horizon = years * HOURS_PER_YEAR
+    out = np.full(n_groups, np.inf)
+    for g in range(n_groups):
+        t = 0.0
+        repairs: List[float] = []        # instants de fin de reconstruction des disques en panne
+        while True:
+            healthy = r - len(repairs)
+            rate = healthy * lam + shock
+            t_fail = t + rng.exponential(1.0 / rate) if rate > 0 else math.inf
+            t_rep = repairs[0] if repairs else math.inf
+            if min(t_fail, t_rep) > horizon:
+                break
+            if t_rep <= t_fail:
+                t = heapq.heappop(repairs)
+                continue
+            t = t_fail
+            if rng.random() < shock / rate:           # choc commun : tout est perdu
+                out[g] = t
+                break
+            heapq.heappush(repairs, t + rebuild_hours)
+            if len(repairs) == r:
+                out[g] = t
+                break
+    return out
+
+
+def nines(availability: float) -> float:
+    """Nombre de « neuf » : 0,999 -> 3."""
+    return -math.log10(1.0 - availability)
