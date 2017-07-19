@@ -403,3 +403,77 @@ def simulate_fifo(arrivals: np.ndarray, services: np.ndarray, c: int = 1) -> Tup
         end[i] = s + services[i]
         heapq.heappush(servers, end[i])
     return start, end
+
+
+def mm1(lam: float, mu: float) -> Dict[str, float]:
+    """File M/M/1 (arrivées de Poisson lam, service exponentiel mu, 1 serveur).
+
+    rho = lam/mu ; nombre moyen dans le système L = rho/(1-rho) ; temps de réponse moyen
+    W = 1/(mu-lam) ; attente moyenne en file Wq = rho/(mu-lam). Loi de Little : L = lam W.
+    """
+    if lam >= mu:
+        return {"rho": lam / mu, "L": math.inf, "W": math.inf, "Wq": math.inf, "Lq": math.inf}
+    rho = lam / mu
+    W = 1.0 / (mu - lam)
+    return {"rho": rho, "L": rho / (1 - rho), "W": W, "Wq": rho * W, "Lq": rho ** 2 / (1 - rho)}
+
+
+def mm1_response_quantile(lam: float, mu: float, q: float) -> float:
+    """Quantile q (fraction) du temps de réponse M/M/1 : loi exponentielle de taux mu - lam."""
+    if lam >= mu:
+        return math.inf
+    return -math.log(1.0 - q) / (mu - lam)
+
+
+def erlang_c(c: int, a: float) -> float:
+    """Probabilité d'attendre dans une file M/M/c de charge offerte a = lam/mu (Erlang C)."""
+    if a >= c:
+        return 1.0
+    b = 1.0
+    for k in range(1, c + 1):
+        b = a * b / (k + a * b)      # récurrence stable d'Erlang B
+    return c * b / (c - a * (1 - b))
+
+
+def mmc(lam: float, mu: float, c: int) -> Dict[str, float]:
+    """File M/M/c : probabilité d'attente, attente moyenne, temps de réponse moyen."""
+    a = lam / mu
+    if a >= c:
+        return {"rho": a / c, "P_attente": 1.0, "Wq": math.inf, "W": math.inf}
+    pw = erlang_c(c, a)
+    wq = pw / (c * mu - lam)
+    return {"rho": a / c, "P_attente": pw, "Wq": wq, "W": wq + 1.0 / mu}
+
+
+def mg1_wait(lam: float, mean_s: float, scv: float) -> float:
+    """Attente moyenne en file M/G/1 (Pollaczek-Khinchine).
+
+    scv : carré du coefficient de variation du temps de service (1 pour l'exponentielle,
+    0 pour un service constant). Wq = lam E[S^2] / (2 (1 - rho)).
+    """
+    rho = lam * mean_s
+    if rho >= 1:
+        return math.inf
+    es2 = mean_s ** 2 * (1.0 + scv)
+    return lam * es2 / (2.0 * (1.0 - rho))
+
+
+# =====================================================================================
+# 4. Fiabilité
+# =====================================================================================
+
+
+def mttf_hours_from_afr(afr: float) -> float:
+    """MTTF (heures) d'un composant à taux de panne constant ayant ce taux annuel (AFR)."""
+    return -HOURS_PER_YEAR / math.log(1.0 - afr)
+
+
+def afr_from_mttf_hours(mttf: float) -> float:
+    """Taux annuel de panne (AFR) d'un composant de MTTF donné (heures)."""
+    return 1.0 - math.exp(-HOURS_PER_YEAR / mttf)
+
+
+def expected_failures(n: int, afr: float, days: float = 1.0) -> float:
+    """Nombre moyen de pannes dans un parc de n composants pendant `days` jours."""
+    lam = -math.log(1.0 - afr) / 365.0
+    return n * lam * days
