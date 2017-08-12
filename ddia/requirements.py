@@ -548,3 +548,105 @@ def simulate_data_loss(r: int, afr: float, rebuild_hours: float, years: float, n
 def nines(availability: float) -> float:
     """Nombre de « neuf » : 0,999 -> 3."""
     return -math.log10(1.0 - availability)
+
+
+def downtime_minutes(availability: float, period_days: float = 365.0) -> float:
+    """Indisponibilité tolérée (minutes) sur la période pour une disponibilité donnée."""
+    return (1.0 - availability) * period_days * 24 * 60
+
+
+def series_availability(*a: float) -> float:
+    """Disponibilité de composants **tous nécessaires** (en série) : produit."""
+    return float(np.prod(a))
+
+
+def parallel_availability(*a: float) -> float:
+    """Disponibilité de composants redondants (un seul suffit), pannes indépendantes."""
+    return 1.0 - float(np.prod([1.0 - x for x in a]))
+
+
+def k_of_n_availability(a: float, k: int, n: int) -> float:
+    """Disponibilité d'un système qui fonctionne si au moins k des n répliques (de
+    disponibilité a, indépendantes) fonctionnent."""
+    return float(sum(math.comb(n, i) * a ** i * (1 - a) ** (n - i) for i in range(k, n + 1)))
+
+
+class TimelineStore(Node):
+    """Stockage des timelines matérialisées : reçoit des ("insert", post, abonné).
+
+    idempotent=True : une insertion déjà vue est ignorée (clé (post, abonné)), ce qui
+    rend les livraisons répétées inoffensives.
+    """
+
+    def __init__(self, name: str = "timelines", idempotent: bool = False):
+        super().__init__(name)
+        self.idempotent = idempotent
+        self.rows: List[Tuple[int, int]] = []
+        self._seen = set()
+
+    def on_message(self, src, msg):
+        if msg[0] == "insert":
+            key = (msg[1], msg[2])
+            if self.idempotent and key in self._seen:
+                return
+            self._seen.add(key)
+            self.rows.append(key)
+
+
+class FanoutWorker(Node):
+    """Travailleur de fan-out : livre un message à ses abonnés, un par `step`, puis acquitte."""
+
+    def __init__(self, name: str, store: str = "timelines", step: float = 0.25):
+        super().__init__(name)
+        self.store, self.step = store, step
+        self.epoch = 0                       # invalide les minuteries d'avant une panne
+
+    def on_message(self, src, msg):
+        if msg[0] == "task":
+            _, task_id, post, followers = msg
+            self._deliver(src, task_id, post, list(followers), 0, self.epoch)
+
+    def _deliver(self, coord, task_id, post, followers, i, epoch):
+        if epoch != self.epoch:
+            return
+        if i == len(followers):
+            self.send(coord, ("done", task_id))
+            return
+        self.send(self.store, ("insert", post, followers[i]))
+        self.set_timer(self.step, self._deliver, coord, task_id, post, followers, i + 1, epoch)
+
+    def on_crash(self):
+        self.epoch += 1                      # le travail en cours est perdu
+
+
+class FanoutCoordinator(Node):
+    """Distribue les tâches de fan-out ; si `timeout` est donné, réattribue une tâche non
+    acquittée à un autre travailleur (sinon, une tâche confiée à un travailleur en panne
+    est perdue)."""
+
+    def __init__(self, name: str, tasks: Dict[int, Tuple[int, List[int]]], workers: List[str],
+                 timeout: Optional[float] = None):
+        super().__init__(name)
+        self.tasks, self.workers, self.timeout = tasks, workers, timeout
+        self.done: set = set()
+        self.assignments: List[Tuple[float, int, str]] = []
+
+    def on_start(self):
+        for k, task_id in enumerate(sorted(self.tasks)):
+            self._assign(task_id, k % len(self.workers))
+
+    def _assign(self, task_id, w):
+        worker = self.workers[w % len(self.workers)]
+        post, followers = self.tasks[task_id]
+        self.assignments.append((self.now, task_id, worker))
+        self.send(worker, ("task", task_id, post, followers))
+        if self.timeout is not None:
+            self.set_timer(self.timeout, self._check, task_id, w)
+
+    def _check(self, task_id, w):
+        if task_id not in self.done:
+            self._assign(task_id, w + 1)
+
+    def on_message(self, src, msg):
+        if msg[0] == "done":
+            self.done.add(msg[1])
