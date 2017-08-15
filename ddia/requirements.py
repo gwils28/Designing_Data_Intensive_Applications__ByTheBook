@@ -650,3 +650,83 @@ class FanoutCoordinator(Node):
     def on_message(self, src, msg):
         if msg[0] == "done":
             self.done.add(msg[1])
+
+
+def fanout_fault_run(variant: str, crash_at: Optional[float] = None, crash_node: str = "w1",
+                     n_posts: int = 4, n_followers: int = 5, seed: int = 0, recover_after: float = 3.0,
+                     until: float = 60.0):
+    """Rejoue un fan-out avec une panne de travailleur injectée.
+
+    variant : "naif" (pas de réattribution), "relance" (réattribution après timeout, stockage
+    non idempotent) ou "idempotent" (réattribution + stockage idempotent).
+    Renvoie (réseau, stockage, verdict) où verdict compte les livraisons perdues et dupliquées.
+    """
+    net = Network(seed=seed, latency=(0.1, 0.3))
+    tasks = {t: (100 + t, [1000 * (t + 1) + j for j in range(n_followers)]) for t in range(n_posts)}
+    store = net.add(TimelineStore(idempotent=(variant == "idempotent")))
+    workers = ["w1", "w2"]
+    for w in workers:
+        net.add(FanoutWorker(w))
+    net.add(FanoutCoordinator("coordinateur", tasks, workers, timeout=None if variant == "naif" else 4.0))
+    if crash_at is not None:
+        net.at(crash_at, net.crash, crash_node)
+        net.at(crash_at + recover_after, net.recover, crash_node)
+    net.run(until=until)
+    expected = {(post, f) for post, fl in tasks.values() for f in fl}
+    counts: Dict[Tuple[int, int], int] = {}
+    for key in store.rows:
+        counts[key] = counts.get(key, 0) + 1
+    verdict = {"perdues": sum(1 for k in expected if k not in counts),
+               "dupliquees": sum(c - 1 for c in counts.values() if c > 1)}
+    return net, store, verdict
+
+
+# =====================================================================================
+# 5. Scalabilité
+# =====================================================================================
+
+
+def amdahl(n, p: float) -> np.ndarray:
+    """Accélération d'Amdahl sur n processeurs quand une fraction p du travail est parallèle."""
+    n = np.asarray(n, dtype=float)
+    return 1.0 / ((1.0 - p) + p / n)
+
+
+def usl(n, sigma: float, kappa: float, lam: float = 1.0) -> np.ndarray:
+    """Universal Scalability Law (Gunther) : débit X(n) = lam n / (1 + sigma (n-1) + kappa n (n-1)).
+
+    sigma : contention (part sérialisée, comme Amdahl) ; kappa : cohérence (coût des
+    échanges entre nœuds, qui croît en n^2 et fait **baisser** le débit au-delà d'un pic).
+    """
+    n = np.asarray(n, dtype=float)
+    return lam * n / (1.0 + sigma * (n - 1.0) + kappa * n * (n - 1.0))
+
+
+def fit_usl(n, x) -> Tuple[float, float, float]:
+    """Ajuste (lam, sigma, kappa) de l'USL sur des mesures de débit x(n).
+
+    lam est pris au plus petit n mesuré (x(n0) / n0, exact si n0 = 1) ; ensuite
+    n lam / x - 1 = sigma (n - 1) + kappa n (n - 1) est linéaire en (sigma, kappa) :
+    moindres carrés sans constante, coefficients contraints positifs.
+    """
+    n = np.asarray(n, dtype=float)
+    x = np.asarray(x, dtype=float)
+    i0 = int(np.argmin(n))
+    lam = x[i0] / n[i0]
+    y = n * lam / x - 1.0
+    A = np.column_stack([n - 1.0, n * (n - 1.0)])
+    coef, *_ = np.linalg.lstsq(A, y, rcond=None)
+    sigma, kappa = (max(0.0, float(c)) for c in coef)
+    return float(lam), sigma, kappa
+
+
+def usl_peak(sigma: float, kappa: float) -> float:
+    """Nombre de nœuds qui maximise le débit USL : sqrt((1 - sigma) / kappa)."""
+    if kappa <= 0:
+        return math.inf
+    return math.sqrt((1.0 - sigma) / kappa)
+
+
+# =====================================================================================
+# 6. Petit utilitaire graphique
+# =====================================================================================
