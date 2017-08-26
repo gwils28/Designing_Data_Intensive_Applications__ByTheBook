@@ -730,3 +730,34 @@ def usl_peak(sigma: float, kappa: float) -> float:
 # =====================================================================================
 # 6. Petit utilitaire graphique
 # =====================================================================================
+
+
+def human_number(v: float) -> str:
+    """Écriture lisible d'un nombre positif pour une graduation : 1e-6 ; 0,001 ; 50 ; 10 k ; 2 M."""
+    if v <= 0:
+        return "0"
+    for div, suf in ((1e9, " G"), (1e6, " M"), (1e4, " k")):
+        if v >= div:
+            x = v / (div if suf != " k" else 1e3)
+            return f"{x:g}{suf}".replace(".", ",")
+    if v >= 1:
+        return f"{v:g}"
+    if v < 1e-3:
+        m, e = f"{v:.0e}".split("e")
+        return f"{m}e-{int(e[1:])}" if e.startswith("-") else f"{m}e{int(e)}"
+    return f"{v:.10f}".rstrip("0").replace(".", ",")
+
+
+def plain_log_axis(ax, which: str = "both") -> None:
+    """Graduations logarithmiques écrites en clair (0,01 ; 1 ; 10 k) au lieu de 10^n.
+
+    Évite aussi le signe moins typographique des exposants négatifs, absent de certaines
+    polices installées.
+    """
+    from matplotlib.ticker import FuncFormatter, NullFormatter
+
+    axes = {"x": [ax.xaxis], "y": [ax.yaxis], "both": [ax.xaxis, ax.yaxis]}[which]
+    for axis in axes:
+        if axis.get_scale() == "log":
+            axis.set_major_formatter(FuncFormatter(lambda v, _: human_number(v)))
+            axis.set_minor_formatter(NullFormatter())
