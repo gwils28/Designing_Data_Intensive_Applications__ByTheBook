@@ -97,3 +97,81 @@ def test_fifo_lindley_et_ordre():
     assert np.allclose(en2, [4, 2, 3])
     st3, en3 = rq.simulate_fifo(np.array([0.0, 0.0, 0.0]), np.array([1.0, 1.0, 1.0]), c=2)
     assert np.allclose(en3, [1, 1, 2])
+
+
+def test_mm1_simulation_et_little():
+    lam, mu, n = 70.0, 100.0, 100_000
+    arr = rq.poisson_arrivals(lam, n, seed=1)
+    svc = np.random.default_rng(2).exponential(1 / mu, n)
+    st, en = rq.simulate_fifo(arr, svc)
+    w = (en - arr)[n // 10:].mean()
+    th = rq.mm1(lam, mu)
+    assert abs(w - th["W"]) / th["W"] < 0.08
+    assert math.isclose(th["L"], lam * th["W"])
+    assert math.isclose(rq.mm1_response_quantile(lam, mu, 0.99), math.log(100) / 30)
+    assert rq.mm1(100, 100)["W"] == math.inf
+
+
+def test_erlang_c_et_pk():
+    assert math.isclose(rq.erlang_c(1, 0.7), 0.7)                 # M/M/1 : P(attente) = rho
+    assert rq.mmc(70, 100, 1)["W"] == pytest.approx(rq.mm1(70, 100)["W"])
+    assert rq.mmc(700, 100, 10)["W"] < rq.mm1(70, 100)["W"]     # mutualisation
+    # P-K : service exponentiel -> attente M/M/1
+    assert rq.mg1_wait(70, 0.01, 1.0) == pytest.approx(rq.mm1(70, 100)["Wq"])
+    assert rq.mg1_wait(70, 0.01, 0.0) == pytest.approx(rq.mm1(70, 100)["Wq"] / 2)
+
+
+# --- fiabilité -----------------------------------------------------------------------
+
+def test_afr_mttf():
+    assert rq.afr_from_mttf_hours(rq.mttf_hours_from_afr(0.03)) == pytest.approx(0.03)
+    assert rq.expected_failures(10_000, 0.03, 365) == pytest.approx(-10_000 * math.log(0.97))
+    assert rq.poisson_pmf(np.arange(50), 3.0).sum() == pytest.approx(1.0)
+
+
+def test_mttdl_formule_et_simulation():
+    lam = 1 / rq.mttf_hours_from_afr(0.03)
+    assert rq.mttdl_hours(0.03, 2, 24) == pytest.approx(1 / (2 * lam ** 2 * 24))
+    sim = rq.simulate_data_loss(2, 0.4, 168, 10, 4000, seed=1)
+    p_sim = np.isfinite(sim).mean()
+    p_th = 1 - math.exp(-10 * 8760 / rq.mttdl_hours(0.4, 2, 168))
+    assert abs(p_sim - p_th) < 0.025
+    # un choc commun fréquent fait tout perdre
+    assert np.isfinite(rq.simulate_data_loss(3, 0.01, 24, 10, 200, seed=2, shock_per_year=1.0)).mean() > 0.99
+
+
+def test_disponibilites():
+    assert rq.nines(0.999) == pytest.approx(3)
+    assert rq.downtime_minutes(0.999, 30) == pytest.approx(43.2)
+    assert rq.series_availability(0.99, 0.99) == pytest.approx(0.9801)
+    assert rq.parallel_availability(0.99, 0.99) == pytest.approx(0.9999)
+    assert rq.k_of_n_availability(0.9, 1, 1) == pytest.approx(0.9)
+    assert rq.k_of_n_availability(0.9, 2, 3) == pytest.approx(0.972)
+
+
+def test_injection_de_fautes_fanout():
+    assert rq.fanout_fault_run("naif")[2] == {"perdues": 0, "dupliquees": 0}
+    assert rq.fanout_fault_run("naif", crash_at=0.5)[2]["perdues"] > 0
+    assert rq.fanout_fault_run("relance", crash_at=0.5)[2]["perdues"] == 0
+    for t in (0.3, 0.9, 1.2, 2.0):
+        assert rq.fanout_fault_run("idempotent", crash_at=t)[2] == {"perdues": 0, "dupliquees": 0}
+
+
+# --- scalabilité ---------------------------------------------------------------------
+
+def test_amdahl_usl_ajustement():
+    assert rq.amdahl(1, 0.9) == pytest.approx(1)
+    assert rq.amdahl(1e9, 0.9) == pytest.approx(10, rel=1e-6)
+    assert rq.usl(1, 0.1, 0.01, 500) == pytest.approx(500)
+    n = np.array([1, 2, 4, 8, 16, 32])
+    lam, s, k = rq.fit_usl(n, rq.usl(n, 0.05, 0.002, 1000))
+    assert lam == pytest.approx(1000) and s == pytest.approx(0.05) and k == pytest.approx(0.002)
+    assert rq.usl_peak(0.05, 0.002) == pytest.approx(math.sqrt(0.95 / 0.002))
+    assert rq.usl_peak(0.05, 0.0) == math.inf
+
+
+def test_human_number():
+    assert rq.human_number(0.01) == "0,01"
+    assert rq.human_number(1e-6) == "1e-6"
+    assert rq.human_number(2.5e6) == "2,5 M"
+    assert rq.human_number(10_000) == "10 k"
