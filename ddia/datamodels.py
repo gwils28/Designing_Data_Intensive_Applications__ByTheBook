@@ -168,3 +168,89 @@ def create_relational(con: sqlite3.Connection, profiles: list[dict], orgs: list[
         CREATE INDEX contact_user ON contact_info (user_id);
         """)
     con.commit()
+
+
+def create_documents(con: sqlite3.Connection, profiles: list[dict]) -> None:
+    """Range chaque profil comme un document JSON autonome (une ligne, une colonne texte)."""
+    con.executescript("DROP TABLE IF EXISTS profiles;"
+                      "CREATE TABLE profiles (user_id INTEGER PRIMARY KEY, doc TEXT);")
+    con.executemany("INSERT INTO profiles VALUES (?, ?)",
+                    [(p["user_id"], json.dumps(p, ensure_ascii=False)) for p in profiles])
+    con.commit()
+
+
+class CountingConnection:
+    """Enveloppe une connexion SQLite et compte les requêtes et les lignes renvoyées.
+
+    Sert de modèle d'un client distant : chaque requête coûte un aller-retour réseau.
+    """
+
+    def __init__(self, con: sqlite3.Connection):
+        self.con = con
+        self.queries = 0
+        self.rows = 0
+
+    def execute(self, sql: str, params=()) -> list[tuple]:
+        self.queries += 1
+        out = self.con.execute(sql, params).fetchall()
+        self.rows += len(out)
+        return out
+
+    def reset(self) -> None:
+        self.queries = self.rows = 0
+
+
+def get_profile_multi(cc: CountingConnection, uid: int) -> dict:
+    """Recompose un profil par plusieurs requêtes simples (une par table)."""
+    (u,) = cc.execute("SELECT u.id, first_name, last_name, headline, region_id, photo_url "
+                      "FROM users u WHERE u.id = ?", (uid,))
+    pos = cc.execute('SELECT p.job_title, o.name, p.org_id, p.start, p."end" FROM positions p '
+                     "JOIN organizations o ON o.id = p.org_id WHERE p.user_id = ? ORDER BY p.start DESC", (uid,))
+    edu = cc.execute('SELECT school_name, start, "end" FROM education WHERE user_id = ? ORDER BY id', (uid,))
+    con = cc.execute("SELECT kind, value FROM contact_info WHERE user_id = ? ORDER BY rowid", (uid,))
+    return _assemble(u, pos, edu, con)
+
+
+def _assemble(u, pos, edu, con) -> dict:
+    return {
+        "user_id": u[0], "first_name": u[1], "last_name": u[2], "headline": u[3],
+        "region_id": u[4], "photo_url": u[5],
+        "positions": [{"job_title": a, "organization": b, "org_id": c, "start": d, "end": e}
+                      for a, b, c, d, e in pos],
+        "education": [{"school_name": a, "start": b, "end": c} for a, b, c in edu],
+        "contact_info": {k: v for k, v in con},
+    }
+
+
+JOIN_SQL = """
+SELECT u.id, u.first_name, u.last_name, u.headline, u.region_id, u.photo_url,
+       p.id, p.job_title, o.name, p.org_id, p.start, p."end",
+       e.id, e.school_name, e.start, e."end",
+       c.rowid, c.kind, c.value
+  FROM users u
+  LEFT JOIN positions p     ON p.user_id = u.id
+  LEFT JOIN organizations o ON o.id = p.org_id
+  LEFT JOIN education e     ON e.user_id = u.id
+  LEFT JOIN contact_info c  ON c.user_id = u.id
+ WHERE u.id = ?
+"""
+
+
+def get_profile_join(cc: CountingConnection, uid: int) -> dict:
+    """Recompose un profil par une seule jointure multiple.
+
+    Les trois listes étant indépendantes, la jointure renvoie leur **produit cartésien** :
+    |postes| x |formations| x |coordonnées| lignes, qu'il faut dédoublonner côté client.
+    """
+    rows = cc.execute(JOIN_SQL, (uid,))
+    u = rows[0][:6]
+    pos, edu, con = {}, {}, {}
+    for r in rows:
+        if r[6] is not None:
+            pos[r[6]] = r[7:12]
+        if r[12] is not None:
+            edu[r[12]] = r[13:16]
+        if r[16] is not None:
+            con[r[16]] = r[17:19]
+    pos_l = sorted(pos.values(), key=lambda t: -t[3])
+    return _assemble(u, pos_l, [edu[k] for k in sorted(edu)], [con[k] for k in sorted(con)])
