@@ -254,3 +254,92 @@ def get_profile_join(cc: CountingConnection, uid: int) -> dict:
             con[r[16]] = r[17:19]
     pos_l = sorted(pos.values(), key=lambda t: -t[3])
     return _assemble(u, pos_l, [edu[k] for k in sorted(edu)], [con[k] for k in sorted(con)])
+
+
+def get_profile_doc(cc: CountingConnection, uid: int) -> dict:
+    """Lit un profil rangé comme un document JSON : une requête, une ligne."""
+    (row,) = cc.execute("SELECT doc FROM profiles WHERE user_id = ?", (uid,))
+    return json.loads(row[0])
+
+
+def round_trip_cost(n_queries: int, n_rows: int, rtt_ms: float = 0.5, per_row_ms: float = 0.002) -> float:
+    """Modèle simple du temps vu par un client distant : allers-retours + transfert des lignes."""
+    return n_queries * rtt_ms + n_rows * per_row_ms
+
+
+# =====================================================================================
+# 2. Pipeline d'agrégation à la MongoDB et mini-MapReduce
+# =====================================================================================
+
+_FAMILIES = {
+    "Sharks": ["Grand requin blanc", "Requin-baleine", "Requin marteau", "Requin-tigre"],
+    "Cetaceans": ["Dauphin commun", "Baleine à bosse", "Orque", "Marsouin"],
+    "Turtles": ["Tortue verte", "Tortue luth", "Caouanne"],
+    "Rays": ["Raie manta", "Pastenague"],
+}
+
+
+def make_observations(n: int = 5000, seed: int = 0, year: int = 2017) -> list[dict]:
+    """Observations d'animaux marins (documents JSON), étalées sur une année.
+
+    La saison compte : les requins sont plus souvent observés l'été.
+    """
+    rng = np.random.default_rng(seed)
+    fams = list(_FAMILIES)
+    out = []
+    for i in range(n):
+        day = int(rng.integers(0, 365))
+        fam = fams[int(rng.choice(len(fams), p=[0.3, 0.35, 0.2, 0.15]))]
+        if fam == "Sharks" and rng.random() < 0.5:
+            day = int(np.clip(rng.normal(200, 30), 0, 364))   # pic estival
+        ts = datetime.fromordinal(datetime(year, 1, 1).toordinal() + day).replace(
+            hour=int(rng.integers(6, 20)), minute=int(rng.integers(0, 60)))
+        out.append({"_id": i, "observationTimestamp": ts.isoformat(), "family": fam,
+                    "species": str(rng.choice(_FAMILIES[fam])),
+                    "numAnimals": int(rng.geometric(0.45)),
+                    "observer_id": int(rng.integers(1, 40))})
+    return out
+
+
+def _get(doc, path: str):
+    cur = doc
+    for part in path.split("."):
+        if isinstance(cur, dict) and part in cur:
+            cur = cur[part]
+        else:
+            return None
+    return cur
+
+
+def _as_dt(v):
+    return v if isinstance(v, datetime) else datetime.fromisoformat(v)
+
+
+def _eval(expr, doc):
+    """Évalue une expression d'agrégation : "$champ", constante, ou {"$op": arg}."""
+    if isinstance(expr, str) and expr.startswith("$"):
+        return _get(doc, expr[1:])
+    if isinstance(expr, dict):
+        if len(expr) == 1 and next(iter(expr)).startswith("$"):
+            op, arg = next(iter(expr.items()))
+            if op == "$year":
+                return _as_dt(_eval(arg, doc)).year
+            if op == "$month":
+                return _as_dt(_eval(arg, doc)).month
+            if op == "$multiply":
+                v = 1
+                for a in arg:
+                    v *= _eval(a, doc)
+                return v
+            if op == "$add":
+                return sum(_eval(a, doc) for a in arg)
+            if op == "$size":
+                return len(_eval(arg, doc) or [])
+            raise ValueError(f"opérateur d'expression inconnu : {op}")
+        return {k: _eval(v, doc) for k, v in expr.items()}
+    return expr
+
+
+_CMP = {"$gt": lambda a, b: a is not None and a > b, "$gte": lambda a, b: a is not None and a >= b,
+        "$lt": lambda a, b: a is not None and a < b, "$lte": lambda a, b: a is not None and a <= b,
+        "$ne": lambda a, b: a != b, "$in": lambda a, b: a in b, "$nin": lambda a, b: a not in b}
