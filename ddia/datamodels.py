@@ -563,3 +563,80 @@ class PropertyGraph:
             CREATE INDEX vertices_name ON vertices (label, properties ->> 'name');
             """)
         con.commit()
+
+
+def example_graph() -> PropertyGraph:
+    """Le petit graphe fil rouge du cours : trois personnes, des lieux emboîtés.
+
+    Les granularités varient volontairement : Inès est née dans une ville, Léa dans une
+    région ; le Québec a des « régions administratives », la France des régions et des
+    départements.
+    """
+    g = PropertyGraph()
+    L = lambda vid, name, typ: g.add_vertex(vid, "Location", name=name, type=typ)
+    L("europe", "Europe", "continent"); L("amnord", "Amérique du Nord", "continent"); L("asie", "Asie", "continent")
+    L("france", "France", "pays"); L("canada", "Canada", "pays"); L("japon", "Japon", "pays")
+    L("aura", "Auvergne-Rhône-Alpes", "région"); L("bretagne", "Bretagne", "région")
+    L("rhone", "Rhône", "département"); L("lyon", "Lyon", "ville")
+    L("quebec", "Québec", "province"); L("montreal", "Montréal", "ville")
+    L("kansai", "Kansai", "région"); L("osaka", "Osaka", "ville")
+    for a, b in [("france", "europe"), ("canada", "amnord"), ("japon", "asie"), ("aura", "france"),
+                 ("bretagne", "france"), ("rhone", "aura"), ("lyon", "rhone"), ("quebec", "canada"),
+                 ("montreal", "quebec"), ("kansai", "japon"), ("osaka", "kansai")]:
+        g.add_edge(a, b, "WITHIN")
+    g.add_vertex("ines", "Person", name="Inès", birth_year=1988)
+    g.add_vertex("kenji", "Person", name="Kenji", birth_year=1985)
+    g.add_vertex("lea", "Person", name="Léa", birth_year=1993)
+    g.add_edge("ines", "lyon", "BORN_IN"); g.add_edge("ines", "montreal", "LIVES_IN")
+    g.add_edge("kenji", "osaka", "BORN_IN"); g.add_edge("kenji", "montreal", "LIVES_IN")
+    g.add_edge("lea", "bretagne", "BORN_IN"); g.add_edge("lea", "lyon", "LIVES_IN")
+    g.add_edge("ines", "kenji", "MARRIED", since=2016); g.add_edge("kenji", "ines", "MARRIED", since=2016)
+    return g
+
+
+def make_world_graph(n_people: int = 20_000, seed: int = 0, countries_per_continent: int = 8,
+                     regions_per_country: int = 6, cities_per_region: int = 10,
+                     coarse: float = 0.1) -> PropertyGraph:
+    """Graphe synthétique : continents > pays > régions > villes, et des personnes.
+
+    Chaque personne est née et vit dans un lieu ; une fraction `coarse` des lieux est
+    renseignée seulement au niveau de la région ou du pays (granularité variable).
+    Environ 70 % des personnes vivent sur leur continent de naissance.
+    """
+    rng = np.random.default_rng(seed)
+    g = PropertyGraph()
+    continents = ["Europe", "Amérique du Nord", "Amérique du Sud", "Afrique", "Asie", "Océanie"]
+    cities_by_cont, coarse_by_cont = {}, {}
+    for ci, cname in enumerate(continents):
+        cid = f"c{ci}"
+        g.add_vertex(cid, "Location", name=cname, type="continent")
+        cities_by_cont[ci], coarse_by_cont[ci] = [], []
+        for k in range(countries_per_continent):
+            kid = f"{cid}k{k}"
+            g.add_vertex(kid, "Location", name=f"Pays {ci}.{k}", type="pays")
+            g.add_edge(kid, cid, "WITHIN")
+            coarse_by_cont[ci].append(kid)
+            for r in range(regions_per_country):
+                rid = f"{kid}r{r}"
+                g.add_vertex(rid, "Location", name=f"Région {ci}.{k}.{r}", type="région")
+                g.add_edge(rid, kid, "WITHIN")
+                coarse_by_cont[ci].append(rid)
+                for v in range(cities_per_region):
+                    vid = f"{rid}v{v}"
+                    g.add_vertex(vid, "Location", name=f"Ville {ci}.{k}.{r}.{v}", type="ville")
+                    g.add_edge(vid, rid, "WITHIN")
+                    cities_by_cont[ci].append(vid)
+
+    def place(ci):
+        pool = coarse_by_cont[ci] if rng.random() < coarse else cities_by_cont[ci]
+        return pool[int(rng.integers(len(pool)))]
+
+    w_cont = np.array([0.22, 0.12, 0.1, 0.18, 0.33, 0.05])
+    for i in range(n_people):
+        pid = f"p{i}"
+        g.add_vertex(pid, "Person", name=f"Personne {i}")
+        born = int(rng.choice(6, p=w_cont))
+        lives = born if rng.random() < 0.7 else int(rng.choice(6, p=w_cont))
+        g.add_edge(pid, place(born), "BORN_IN")
+        g.add_edge(pid, place(lives), "LIVES_IN")
+    return g
