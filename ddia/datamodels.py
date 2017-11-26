@@ -343,3 +343,93 @@ def _eval(expr, doc):
 _CMP = {"$gt": lambda a, b: a is not None and a > b, "$gte": lambda a, b: a is not None and a >= b,
         "$lt": lambda a, b: a is not None and a < b, "$lte": lambda a, b: a is not None and a <= b,
         "$ne": lambda a, b: a != b, "$in": lambda a, b: a in b, "$nin": lambda a, b: a not in b}
+
+
+def _matches(doc, cond: dict) -> bool:
+    for field, want in cond.items():
+        if field == "$or":
+            if not any(_matches(doc, c) for c in want):
+                return False
+            continue
+        val = _get(doc, field)
+        if isinstance(want, dict) and want and all(k.startswith("$") for k in want):
+            if not all(_CMP[op](val, arg) for op, arg in want.items()):
+                return False
+        elif isinstance(val, list) and not isinstance(want, list):
+            if want not in val:                 # égalité sur un tableau : « contient »
+                return False
+        elif val != want:
+            return False
+    return True
+
+
+def _freeze(v):
+    return json.dumps(v, sort_keys=True, default=str)
+
+
+def aggregate(docs: list[dict], pipeline: list[dict], collections: dict | None = None,
+              stats: dict | None = None) -> list[dict]:
+    """Exécute un pipeline d'agrégation (sous-ensemble du langage de MongoDB).
+
+    Étapes : $match, $group (accumulateurs $sum, $avg, $min, $max, $push, $first),
+    $sort, $limit, $project, $unwind, $lookup, $count. `collections` fournit les
+    collections référencées par $lookup. `stats`, si fourni, reçoit le nombre de
+    documents en sortie de chaque étape.
+    """
+    collections = collections or {}
+    cur = list(docs)
+    for i, stage in enumerate(pipeline):
+        (op, arg), = stage.items()
+        if op == "$match":
+            cur = [d for d in cur if _matches(d, arg)]
+        elif op == "$group":
+            groups, order = {}, []
+            for d in cur:
+                key = _eval(arg["_id"], d)
+                k = _freeze(key)
+                if k not in groups:
+                    groups[k] = {"_id": key, "_acc": defaultdict(list)}
+                    order.append(k)
+                for name, acc in arg.items():
+                    if name == "_id":
+                        continue
+                    (aop, aexpr), = acc.items()
+                    groups[k]["_acc"][name].append(_eval(aexpr, d))
+            out = []
+            for k in order:
+                g = groups[k]
+                row = {"_id": g["_id"]}
+                for name, acc in arg.items():
+                    if name == "_id":
+                        continue
+                    (aop, _), = acc.items()
+                    vals = g["_acc"][name]
+                    row[name] = {"$sum": sum, "$avg": lambda v: sum(v) / len(v), "$min": min, "$max": max,
+                                 "$push": list, "$first": lambda v: v[0]}[aop](vals)
+                out.append(row)
+            cur = out
+        elif op == "$sort":
+            for field, direction in reversed(list(arg.items())):
+                cur.sort(key=lambda d: _freeze(_get(d, field)) if isinstance(_get(d, field), dict)
+                         else _get(d, field), reverse=direction < 0)
+        elif op == "$limit":
+            cur = cur[:arg]
+        elif op == "$project":
+            cur = [{**({"_id": d.get("_id")} if arg.get("_id", 1) else {}),
+                    **{k: (_get(d, k) if v in (1, True) else _eval(v, d))
+                       for k, v in arg.items() if k != "_id" and v not in (0, False)}} for d in cur]
+        elif op == "$unwind":
+            field = arg[1:]
+            cur = [{**d, field: item} for d in cur for item in (_get(d, field) or [])]
+        elif op == "$lookup":
+            foreign = defaultdict(list)
+            for f in collections[arg["from"]]:
+                foreign[_freeze(_get(f, arg["foreignField"]))].append(f)
+            cur = [{**d, arg["as"]: list(foreign.get(_freeze(_get(d, arg["localField"])), []))} for d in cur]
+        elif op == "$count":
+            cur = [{arg: len(cur)}]
+        else:
+            raise ValueError(f"étape inconnue : {op}")
+        if stats is not None:
+            stats[f"{i}:{op}"] = len(cur)
+    return cur
