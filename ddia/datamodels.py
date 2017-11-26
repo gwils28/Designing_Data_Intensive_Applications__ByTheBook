@@ -433,3 +433,133 @@ def aggregate(docs: list[dict], pipeline: list[dict], collections: dict | None =
         if stats is not None:
             stats[f"{i}:{op}"] = len(cur)
     return cur
+
+
+def map_reduce(docs: list[dict], mapper, reducer, query: dict | None = None,
+               stats: dict | None = None) -> dict:
+    """MapReduce sur une collection : `mapper(doc, emit)` puis `reducer(clé, valeurs)`.
+
+    `query` filtre d'abord les documents (comme le paramètre `query` de MongoDB).
+    """
+    groups = defaultdict(list)
+    n_in = n_emit = 0
+
+    def emit(k, v):
+        nonlocal n_emit
+        n_emit += 1
+        groups[k].append(v)
+
+    for d in docs:
+        if query is None or _matches(d, query):
+            n_in += 1
+            mapper(d, emit)
+    out = {k: (reducer(k, vs) if len(vs) > 1 else vs[0]) for k, vs in groups.items()}
+    if stats is not None:
+        stats.update(documents=n_in, emissions=n_emit, cles=len(groups))
+    return out
+
+
+# =====================================================================================
+# 3. Graphe de propriétés
+# =====================================================================================
+
+class PropertyGraph:
+    """Graphe de propriétés : sommets et arêtes étiquetés, chacun avec ses propriétés.
+
+    Deux index (arêtes sortantes et entrantes de chaque sommet) permettent de parcourir
+    le graphe dans les deux sens, comme les index `edges_tails` et `edges_heads`
+    d'un schéma relationnel à deux tables.
+    """
+
+    def __init__(self):
+        self.vertices: dict = {}                  # id -> (label, props)
+        self.edges: list = []                     # (edge_id, tail, head, label, props)
+        self._out = defaultdict(list)             # tail -> [edge_id]
+        self._in = defaultdict(list)              # head -> [edge_id]
+        self._by_name = defaultdict(list)         # props["name"] -> [vid] (index secondaire)
+
+    def add_vertex(self, vid, label: str, **props):
+        self.vertices[vid] = (label, props)
+        if "name" in props:
+            self._by_name[props["name"]].append(vid)
+        return vid
+
+    def add_edge(self, tail, head, label: str, **props) -> int:
+        eid = len(self.edges)
+        self.edges.append((eid, tail, head, label, props))
+        self._out[tail].append(eid)
+        self._in[head].append(eid)
+        return eid
+
+    def label(self, vid) -> str:
+        return self.vertices[vid][0]
+
+    def props(self, vid) -> dict:
+        return self.vertices[vid][1]
+
+    def out(self, vid, label: str | None = None, counter: dict | None = None) -> list:
+        res = []
+        for e in self._out.get(vid, ()):
+            if counter is not None:
+                counter["aretes"] = counter.get("aretes", 0) + 1
+            if label is None or self.edges[e][3] == label:
+                res.append(self.edges[e][2])
+        return res
+
+    def inn(self, vid, label: str | None = None, counter: dict | None = None) -> list:
+        res = []
+        for e in self._in.get(vid, ()):
+            if counter is not None:
+                counter["aretes"] = counter.get("aretes", 0) + 1
+            if label is None or self.edges[e][3] == label:
+                res.append(self.edges[e][1])
+        return res
+
+    def find(self, label: str | None = None, **props) -> list:
+        """Sommets ayant ce label et ces propriétés (index sur `name` si fourni)."""
+        cands = self._by_name.get(props["name"], []) if "name" in props else list(self.vertices)
+        return [v for v in cands if (label is None or self.vertices[v][0] == label)
+                and all(self.vertices[v][1].get(k) == val for k, val in props.items())]
+
+    def closure(self, starts, label: str, direction: str = "in", counter: dict | None = None) -> set:
+        """Sommets atteignables depuis `starts` en suivant 0, 1, 2... arêtes `label`.
+
+        direction="out" suit les arêtes dans leur sens (de la queue vers la tête),
+        direction="in" les remonte. C'est le `-[:WITHIN*0..]->` de Cypher.
+        """
+        step = self.out if direction == "out" else self.inn
+        seen = set(starts)
+        frontier = list(starts)
+        while frontier:
+            nxt = []
+            for v in frontier:
+                for w in step(v, label, counter):
+                    if w not in seen:
+                        seen.add(w)
+                        nxt.append(w)
+            frontier = nxt
+        return seen
+
+    def to_sqlite(self, con: sqlite3.Connection, indexes: bool = True) -> None:
+        """Exporte le graphe dans deux tables `vertices` et `edges` (propriétés en JSON)."""
+        con.executescript("""
+        DROP TABLE IF EXISTS vertices; DROP TABLE IF EXISTS edges;
+        CREATE TABLE vertices (vertex_id INTEGER PRIMARY KEY, label TEXT, properties TEXT);
+        CREATE TABLE edges (edge_id INTEGER PRIMARY KEY,
+                            tail_vertex INTEGER REFERENCES vertices (vertex_id),
+                            head_vertex INTEGER REFERENCES vertices (vertex_id),
+                            label TEXT, properties TEXT);
+        """)
+        ids = {v: i for i, v in enumerate(self.vertices)}
+        con.executemany("INSERT INTO vertices VALUES (?, ?, ?)",
+                        [(ids[v], lab, json.dumps(p, ensure_ascii=False)) for v, (lab, p) in self.vertices.items()])
+        con.executemany("INSERT INTO edges VALUES (?, ?, ?, ?, ?)",
+                        [(e, ids[t], ids[h], lab, json.dumps(p, ensure_ascii=False))
+                         for e, t, h, lab, p in self.edges])
+        if indexes:
+            con.executescript("""
+            CREATE INDEX edges_tails ON edges (tail_vertex, label);
+            CREATE INDEX edges_heads ON edges (head_vertex, label);
+            CREATE INDEX vertices_name ON vertices (label, properties ->> 'name');
+            """)
+        con.commit()
