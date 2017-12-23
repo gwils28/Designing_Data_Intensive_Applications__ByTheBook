@@ -640,3 +640,75 @@ def make_world_graph(n_people: int = 20_000, seed: int = 0, countries_per_contin
         g.add_edge(pid, place(born), "BORN_IN")
         g.add_edge(pid, place(lives), "LIVES_IN")
     return g
+
+
+def emigrants_forward(g: PropertyGraph, born: str, lives: str, counter: dict | None = None) -> set:
+    """Stratégie 1 : partir de chaque personne et remonter ses lieux (WITHIN sortants)."""
+    res = set()
+    for v, (lab, p) in g.vertices.items():
+        if lab != "Person":
+            continue
+        if counter is not None:
+            counter["sommets"] = counter.get("sommets", 0) + 1
+        ok = True
+        for rel, target in (("BORN_IN", born), ("LIVES_IN", lives)):
+            places = g.out(v, rel, counter)
+            anc = g.closure(places, "WITHIN", "out", counter)
+            if not any(g.props(a).get("name") == target for a in anc):
+                ok = False
+                break
+        if ok:
+            res.add(p["name"])
+    return res
+
+
+def emigrants_backward(g: PropertyGraph, born: str, lives: str, counter: dict | None = None) -> set:
+    """Stratégie 2 : partir des deux lieux (index sur `name`) et descendre (WITHIN entrants)."""
+    sets = []
+    for rel, target in (("BORN_IN", born), ("LIVES_IN", lives)):
+        start = g.find("Location", name=target)
+        if counter is not None:
+            counter["sommets"] = counter.get("sommets", 0) + len(start)
+        inside = g.closure(start, "WITHIN", "in", counter)
+        people = set()
+        for loc in inside:
+            people.update(g.inn(loc, rel, counter))
+        sets.append(people)
+    return {g.props(v)["name"] for v in sets[0] & sets[1]}
+
+
+EMIGRANTS_SQL = """
+WITH RECURSIVE
+  -- tous les lieux situés (directement ou non) dans le lieu de naissance cherché
+  in_born(vertex_id) AS (
+      SELECT vertex_id FROM vertices
+       WHERE label = 'Location' AND properties ->> 'name' = :born
+    UNION
+      SELECT edges.tail_vertex FROM edges
+        JOIN in_born ON edges.head_vertex = in_born.vertex_id
+       WHERE edges.label = 'WITHIN'
+  ),
+  -- tous les lieux situés dans le lieu de résidence cherché
+  in_lives(vertex_id) AS (
+      SELECT vertex_id FROM vertices
+       WHERE label = 'Location' AND properties ->> 'name' = :lives
+    UNION
+      SELECT edges.tail_vertex FROM edges
+        JOIN in_lives ON edges.head_vertex = in_lives.vertex_id
+       WHERE edges.label = 'WITHIN'
+  ),
+  born_there(vertex_id) AS (
+      SELECT edges.tail_vertex FROM edges
+        JOIN in_born ON edges.head_vertex = in_born.vertex_id
+       WHERE edges.label = 'BORN_IN'
+  ),
+  living_there(vertex_id) AS (
+      SELECT edges.tail_vertex FROM edges
+        JOIN in_lives ON edges.head_vertex = in_lives.vertex_id
+       WHERE edges.label = 'LIVES_IN'
+  )
+SELECT vertices.properties ->> 'name'
+  FROM vertices
+  JOIN born_there   ON vertices.vertex_id = born_there.vertex_id
+  JOIN living_there ON vertices.vertex_id = living_there.vertex_id
+"""
