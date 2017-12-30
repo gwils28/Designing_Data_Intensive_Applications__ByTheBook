@@ -712,3 +712,162 @@ SELECT vertices.properties ->> 'name'
   JOIN born_there   ON vertices.vertex_id = born_there.vertex_id
   JOIN living_there ON vertices.vertex_id = living_there.vertex_id
 """
+
+
+def emigrants_sql(con: sqlite3.Connection, born: str, lives: str) -> set:
+    return {r[0] for r in con.execute(EMIGRANTS_SQL, {"born": born, "lives": lives})}
+
+
+# =====================================================================================
+# 4. Magasin de triplets et requêtes à la SPARQL
+# =====================================================================================
+
+class TripleStore:
+    """Triplets (sujet, prédicat, objet) avec trois index : SPO, POS et OSP.
+
+    Les objets sont soit des littéraux (str, int...), soit des sommets. Pour distinguer
+    les deux, les sommets sont des chaînes commençant par « _: » (nœuds anonymes de
+    Turtle) ou des URI entre chevrons.
+    """
+
+    def __init__(self):
+        self.spo = defaultdict(lambda: defaultdict(set))
+        self.pos = defaultdict(lambda: defaultdict(set))
+        self.osp = defaultdict(lambda: defaultdict(set))
+        self.n = 0
+
+    def add(self, s, p, o) -> None:
+        if o in self.spo[s][p]:
+            return
+        self.spo[s][p].add(o)
+        self.pos[p][o].add(s)
+        self.osp[o][s].add(p)
+        self.n += 1
+
+    def __len__(self) -> int:
+        return self.n
+
+    def match(self, s=None, p=None, o=None):
+        """Triplets correspondant au motif (None = n'importe quoi), via le meilleur index."""
+        if s is not None:
+            preds = [p] if p is not None else list(self.spo.get(s, {}))
+            for pp in preds:
+                for oo in self.spo.get(s, {}).get(pp, ()):
+                    if o is None or oo == o:
+                        yield s, pp, oo
+        elif p is not None:
+            objs = [o] if o is not None else list(self.pos.get(p, {}))
+            for oo in objs:
+                for ss in self.pos.get(p, {}).get(oo, ()):
+                    yield ss, p, oo
+        elif o is not None:
+            for ss, preds in self.osp.get(o, {}).items():
+                for pp in preds:
+                    yield ss, pp, o
+        else:
+            for ss, d in self.spo.items():
+                for pp, objs in d.items():
+                    for oo in objs:
+                        yield ss, pp, oo
+
+    # -------- chemins de propriétés : ":bornIn / :within* / :name"
+    def _step_fwd(self, nodes, pred):
+        if pred.endswith("*"):
+            base, seen, frontier = pred[:-1], set(nodes), list(nodes)
+            while frontier:
+                nxt = []
+                for n in frontier:
+                    for o in self.spo.get(n, {}).get(base, ()):
+                        if o not in seen:
+                            seen.add(o)
+                            nxt.append(o)
+                frontier = nxt
+            return seen
+        return {o for n in nodes for o in self.spo.get(n, {}).get(pred, ())}
+
+    def _step_bwd(self, nodes, pred):
+        if pred.endswith("*"):
+            base, seen, frontier = pred[:-1], set(nodes), list(nodes)
+            while frontier:
+                nxt = []
+                for n in frontier:
+                    for s in self.pos.get(base, {}).get(n, ()):
+                        if s not in seen:
+                            seen.add(s)
+                            nxt.append(s)
+                frontier = nxt
+            return seen
+        return {s for n in nodes for s in self.pos.get(pred, {}).get(n, ())}
+
+    def path_objects(self, s, path) -> set:
+        nodes = {s}
+        for pred in path:
+            nodes = self._step_fwd(nodes, pred)
+        return nodes
+
+    def path_subjects(self, o, path) -> set:
+        nodes = {o}
+        for pred in reversed(path):
+            nodes = self._step_bwd(nodes, pred)
+        return nodes
+
+    def query(self, patterns, stats: list | None = None) -> list[dict]:
+        """Évalue un motif de graphe : liste de triplets dont les termes « ?x » sont des variables.
+
+        Le prédicat peut être un chemin : un tuple de prédicats, « p* » signifiant « zéro,
+        une ou plusieurs fois p ». Les motifs sont joints **dans l'ordre donné** (pas
+        d'optimiseur) ; `stats` reçoit le nombre de solutions partielles après chaque motif.
+        """
+        isvar = lambda t: isinstance(t, str) and t.startswith("?")
+        sols = [{}]
+        for s, p, o in patterns:
+            new = []
+            for b in sols:
+                ss = b.get(s, s) if isvar(s) else s
+                oo = b.get(o, o) if isvar(o) else o
+                s_free, o_free = isvar(ss), isvar(oo)
+                if isinstance(p, tuple):
+                    if not s_free:
+                        cands = [(ss, x) for x in self.path_objects(ss, p)]
+                    elif not o_free:
+                        cands = [(x, oo) for x in self.path_subjects(oo, p)]
+                    else:
+                        cands = [(x, y) for x in list(self.spo) for y in self.path_objects(x, p)]
+                    for x, y in cands:
+                        if (o_free or y == oo) and (s_free or x == ss):
+                            nb = dict(b)
+                            if s_free:
+                                nb[s] = x
+                            if o_free:
+                                nb[o] = y
+                            new.append(nb)
+                else:
+                    pp = b.get(p, p) if isvar(p) else p
+                    for x, y, z in self.match(None if s_free else ss, None if isvar(pp) else pp,
+                                              None if o_free else oo):
+                        nb = dict(b)
+                        if s_free:
+                            nb[s] = x
+                        if isvar(pp):
+                            nb[p] = y
+                        if o_free:
+                            if o in nb and nb[o] != z:
+                                continue
+                            nb[o] = z
+                        new.append(nb)
+            sols = new
+            if stats is not None:
+                stats.append(len(sols))
+        return sols
+
+    def to_turtle(self, prefix: str = "urn:example:") -> str:
+        """Sérialisation Turtle compacte (un sujet par ligne, « ; » entre prédicats)."""
+        lines = [f"@prefix : <{prefix}>."]
+        fmt_o = lambda o: o if isinstance(o, str) and o.startswith("_:") else json.dumps(o, ensure_ascii=False)
+        for s, preds in self.spo.items():
+            parts = []
+            for p in sorted(preds, key=lambda x: (x != "a", x)):
+                for o in sorted(preds[p], key=str):
+                    parts.append(("a " + ":" + o) if p == "a" else f":{p} {fmt_o(o)}")
+            lines.append(f"{s} " + "; ".join(parts) + ".")
+        return "\n".join(lines)
