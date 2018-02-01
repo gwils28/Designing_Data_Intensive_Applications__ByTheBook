@@ -964,3 +964,131 @@ def parse_datalog(text: str):
         assert toks[i] == ("p", "."), "« . » attendu en fin de clause"
         i += 1
     return facts, rules
+
+
+def _const(a):
+    return a[1:] if isinstance(a, str) and a.startswith('"') else a
+
+
+class Datalog:
+    """Mini-moteur Datalog (sans négation) à évaluation ascendante.
+
+    `evaluate("naive")` réapplique toutes les règles à tous les faits jusqu'au point fixe ;
+    `evaluate("seminaive")` ne joint, à chaque tour, qu'avec les faits **nouveaux** du tour
+    précédent. Les deux calculent le même résultat ; la seconde fait beaucoup moins de
+    dérivations redondantes.
+    """
+
+    def __init__(self, program: str | None = None):
+        self.edb = defaultdict(set)     # faits stockés
+        self.rules = []
+        self.rel = {}
+        self.stats = {}
+        if program:
+            self.load(program)
+
+    def load(self, program: str) -> "Datalog":
+        facts, rules = parse_datalog(program)
+        for p, t in facts:
+            self.edb[p].add(t)
+        self.rules.extend(rules)
+        return self
+
+    def add_fact(self, pred: str, *args) -> None:
+        self.edb[pred].add(tuple(args))
+
+    def add_rule(self, text: str) -> None:
+        _, rules = parse_datalog(text)
+        self.rules.extend(rules)
+
+    @property
+    def idb_preds(self) -> set:
+        return {h[0] for h, _ in self.rules}
+
+    # -- jointure d'un corps de règle, atome par atome (boucles imbriquées avec index)
+    @staticmethod
+    def _index(tuples, positions):
+        idx = defaultdict(list)
+        for t in tuples:
+            idx[tuple(t[p] for p in positions)].append(t)
+        return idx
+
+    def _fire(self, head, body, sources, counter):
+        """Dérive les têtes de la règle ; sources[k] = ensemble de tuples pour l'atome k."""
+        out = []
+        cache = {}
+
+        def rec(k, b):
+            if k == len(body):
+                counter[0] += 1
+                out.append(tuple(_const(b[a]) if _is_var(a) else _const(a) for a in head[1]))
+                return
+            pred, args = body[k]
+            bound = [j for j, a in enumerate(args) if not _is_var(a) or a in b]
+            key = (k, tuple(bound))
+            if key not in cache:
+                cache[key] = self._index(sources[k], bound)
+            want = tuple(_const(b[args[j]]) if _is_var(args[j]) else _const(args[j]) for j in bound)
+            for t in cache[key].get(want, ()):
+                nb = b
+                ok = True
+                for j, a in enumerate(args):
+                    if _is_var(a) and a not in b:
+                        if nb is b:
+                            nb = dict(b)
+                        if a in nb and nb[a] != t[j]:
+                            ok = False
+                            break
+                        nb[a] = t[j]
+                if ok:
+                    rec(k + 1, nb)
+
+        rec(0, {})
+        return out
+
+    def evaluate(self, method: str = "seminaive", max_iter: int = 10_000) -> dict:
+        idb = self.idb_preds
+        rel = defaultdict(set, {p: set(t) for p, t in self.edb.items()})
+        for p in idb:
+            rel.setdefault(p, set())
+        counter = [0]
+        per_iter = []
+        delta = None
+        for it in range(max_iter):
+            new = defaultdict(set)
+            for head, body in self.rules:
+                if method == "naive" or delta is None:
+                    derived = self._fire(head, body, [rel[p] for p, _ in body], counter)
+                    for t in derived:
+                        if t not in rel[head[0]]:
+                            new[head[0]].add(t)
+                else:
+                    idb_pos = [k for k, (p, _) in enumerate(body) if p in idb]
+                    for k in idb_pos:
+                        if not delta.get(body[k][0]):
+                            continue
+                        srcs = [delta[p] if j == k else rel[p] for j, (p, _) in enumerate(body)]
+                        for t in self._fire(head, body, srcs, counter):
+                            if t not in rel[head[0]]:
+                                new[head[0]].add(t)
+            n_new = sum(len(v) for v in new.values())
+            per_iter.append({"iteration": it + 1, "derivations": counter[0], "nouveaux": n_new})
+            if n_new == 0:
+                break
+            for p, ts in new.items():
+                rel[p] |= ts
+            delta = new
+        self.rel = rel
+        self.stats = {"methode": method, "iterations": len(per_iter), "derivations": counter[0],
+                      "par_iteration": per_iter}
+        return self.stats
+
+    def query(self, pred: str, *pattern) -> list[tuple]:
+        """Tuples de `pred` correspondant au motif (None = n'importe quoi)."""
+        if not self.rel:
+            self.evaluate()
+        res = []
+        for t in self.rel.get(pred, ()):
+            if all(p is None or t[j] == p for j, p in enumerate(pattern)):
+                res.append(t)
+        return sorted(res, key=str)
