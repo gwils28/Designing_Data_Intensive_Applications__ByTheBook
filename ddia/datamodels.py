@@ -871,3 +871,96 @@ class TripleStore:
                     parts.append(("a " + ":" + o) if p == "a" else f":{p} {fmt_o(o)}")
             lines.append(f"{s} " + "; ".join(parts) + ".")
         return "\n".join(lines)
+
+
+def graph_to_triples(g: PropertyGraph) -> TripleStore:
+    """Traduit un graphe de propriétés en triplets.
+
+    Sommet v de label L : (_:v, a, L) ; propriété k=x : (_:v, k, x) ; arête de label E :
+    (_:tail, e, _:head) avec e = E en camelCase (BORN_IN -> bornIn).
+    """
+    ts = TripleStore()
+    camel = lambda lab: re.sub(r"_([a-z])", lambda m: m.group(1).upper(), lab.lower())
+    for v, (lab, props) in g.vertices.items():
+        ts.add(f"_:{v}", "a", lab)
+        for k, x in props.items():
+            ts.add(f"_:{v}", camel(k.upper()), x)
+    for _, t, h, lab, _p in g.edges:
+        ts.add(f"_:{t}", camel(lab), f"_:{h}")
+    return ts
+
+
+# =====================================================================================
+# 5. Datalog
+# =====================================================================================
+
+_TOKEN = re.compile(r'\s*(?:(:-)|("(?:[^"\\]|\\.)*")|(-?\d+)|([A-Za-z_][A-Za-z0-9_]*)|([(),.]))')
+
+
+def _is_var(t) -> bool:
+    return isinstance(t, str) and not t.startswith('"') and (t[0].isupper() or t[0] == "_")
+
+
+def parse_datalog(text: str):
+    """Analyse un programme Datalog : faits `p(a, 1, "x").` et règles `h(X) :- b(X, Y), c(Y).`
+
+    Variables : identifiants commençant par une majuscule ou « _ » (le « _ » seul est
+    anonyme). Constantes : nombres, chaînes entre guillemets, identifiants en minuscules.
+    Commentaires : `/* ... */` et `% ...`. Renvoie (faits, règles) où un fait est
+    (prédicat, tuple) et une règle (tête, [atomes du corps]), un atome étant (prédicat, tuple).
+    """
+    text = re.sub(r"/\*.*?\*/", " ", text, flags=re.S)
+    text = re.sub(r"%[^\n]*", " ", text)
+    toks, pos = [], 0
+    while pos < len(text):
+        if text[pos:].strip() == "":
+            break
+        m = _TOKEN.match(text, pos)
+        if not m:
+            raise SyntaxError(f"Datalog : caractère inattendu près de {text[pos:pos + 20]!r}")
+        pos = m.end()
+        arrow, s, num, ident, punct = m.groups()
+        toks.append(("op", ":-") if arrow else ("str", json.loads(s)) if s else
+                    ("num", int(num)) if num else ("id", ident) if ident else ("p", punct))
+    i = 0
+    anon = [0]
+
+    def atom():
+        nonlocal i
+        kind, name = toks[i]
+        assert kind == "id", f"prédicat attendu, trouvé {name!r}"
+        i += 1
+        assert toks[i] == ("p", "("), f"« ( » attendu après {name}"
+        i += 1
+        args = []
+        while toks[i] != ("p", ")"):
+            k, v = toks[i]
+            if k == "id" and v == "_":
+                anon[0] += 1
+                v = f"_{anon[0]}"
+            elif k == "str":
+                v = '"' + v                     # marque les constantes chaînes
+            args.append(v)
+            i += 1
+            if toks[i] == ("p", ","):
+                i += 1
+        i += 1
+        return name, tuple(args)
+
+    facts, rules = [], []
+    while i < len(toks):
+        head = atom()
+        if toks[i] == ("op", ":-"):
+            i += 1
+            body = [atom()]
+            while toks[i] == ("p", ","):
+                i += 1
+                body.append(atom())
+            rules.append((head, body))
+        else:
+            if any(_is_var(a) for a in head[1]):
+                raise SyntaxError(f"un fait ne peut pas contenir de variable : {head}")
+            facts.append((head[0], tuple(_const(a) for a in head[1])))
+        assert toks[i] == ("p", "."), "« . » attendu en fin de clause"
+        i += 1
+    return facts, rules
