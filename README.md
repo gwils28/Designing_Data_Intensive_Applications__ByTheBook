@@ -68,7 +68,7 @@ Lancer les tests : `pytest tests/`.
 | | *Partie I - Fondements des systèmes de données* | |
 | 1 | [Applications fiables, scalables et maintenables](notebooks/ch01_fiabilite_scalabilite_maintenabilite) | ✅ |
 | 2 | [Modèles de données et langages de requête](notebooks/ch02_modeles_de_donnees) | ✅ |
-| 3 | Stockage et recherche | ⬜ |
+| 3 | Stockage et recherche | 🚧 |
 | 4 | Encodage et évolution | ⬜ |
 | | *Partie II - Données distribuées* | |
 | 5 | Réplication | ⬜ |
