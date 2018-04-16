@@ -280,3 +280,152 @@ class HashIndexStore:
 # =====================================================================================
 # 4. Filtre de Bloom
 # =====================================================================================
+
+
+def _hash2(key: str) -> Tuple[int, int]:
+    h = hashlib.blake2b(key.encode("utf-8"), digest_size=16).digest()
+    return int.from_bytes(h[:8], "little"), int.from_bytes(h[8:], "little") | 1
+
+
+class BloomFilter:
+    """Filtre de Bloom de m bits et k fonctions de hachage (double hachage de Kirsch et
+    Mitzenmacher : h_i(x) = h1(x) + i * h2(x) mod m)."""
+
+    def __init__(self, m_bits: int, k: int):
+        self.m = max(8, int(m_bits))
+        self.k = max(1, int(k))
+        self.bits = np.zeros(self.m, dtype=bool)
+        self.n = 0
+
+    @classmethod
+    def for_capacity(cls, n: int, bits_per_key: float) -> "BloomFilter":
+        m = max(8, int(round(n * bits_per_key)))
+        return cls(m, bloom_optimal_k(m, max(1, n)))
+
+    def positions(self, key: str) -> List[int]:
+        h1, h2 = _hash2(key)
+        return [(h1 + i * h2) % self.m for i in range(self.k)]
+
+    def add(self, key: str) -> None:
+        self.bits[self.positions(key)] = True
+        self.n += 1
+
+    def __contains__(self, key: str) -> bool:
+        return bool(self.bits[self.positions(key)].all())
+
+    def fill_ratio(self) -> float:
+        return float(self.bits.mean())
+
+    def size_bytes(self) -> int:
+        return (self.m + 7) // 8
+
+
+def bloom_fp_rate(n: int, m: int, k: int) -> float:
+    """Taux de faux positifs théorique : (1 - e^{-kn/m})^k."""
+    return (1.0 - math.exp(-k * n / m)) ** k
+
+
+def bloom_optimal_k(m: int, n: int) -> int:
+    """Nombre de fonctions de hachage qui minimise les faux positifs : (m/n) ln 2."""
+    return max(1, int(round(m / n * math.log(2))))
+
+
+def bloom_bits_per_key(fp: float) -> float:
+    """Bits par clé nécessaires (avec k optimal) pour un taux de faux positifs donné :
+    m/n = -ln(p) / (ln 2)^2 ≈ 1,44 log2(1/p)."""
+    return -math.log(fp) / math.log(2) ** 2
+
+
+# =====================================================================================
+# 5. SSTable et fusion
+# =====================================================================================
+
+Item = Tuple[str, Optional[str]]  # (clé, valeur) ; valeur None = tombstone
+
+
+class SSTable:
+    """Table triée immuable : blocs de `block_bytes`, index épars (première clé de chaque
+    bloc) et filtre de Bloom. Les données restent en mémoire Python, mais tout accès est
+    compté comme une lecture de bloc."""
+
+    _seq = 0
+
+    def __init__(self, items: Sequence[Item], block_bytes: int = 4096, bloom_bits_per_key: float = 10.0,
+                 compress: bool = False):
+        SSTable._seq += 1
+        self.id = SSTable._seq
+        self.blocks: List[List[Item]] = []
+        self.sparse_index: List[str] = []
+        cur, cur_bytes = [], 0
+        self.size_bytes = 0
+        raw = bytearray()
+        for k, v in items:
+            sz = record_size(k, v)
+            if cur and cur_bytes + sz > block_bytes:
+                self._close_block(cur, raw, compress)
+                cur, cur_bytes, raw = [], 0, bytearray()
+            cur.append((k, v))
+            cur_bytes += sz
+            if compress:
+                raw += encode_record(k, v)
+            else:
+                self.size_bytes += sz
+        if cur:
+            self._close_block(cur, raw, compress)
+        self.n = sum(len(b) for b in self.blocks)
+        self.bloom = None
+        if bloom_bits_per_key and self.n:
+            self.bloom = BloomFilter.for_capacity(self.n, bloom_bits_per_key)
+            for b in self.blocks:
+                for k, _ in b:
+                    self.bloom.add(k)
+        self.min_key = self.blocks[0][0][0] if self.blocks else None
+        self.max_key = self.blocks[-1][-1][0] if self.blocks else None
+
+    def _close_block(self, cur, raw, compress) -> None:
+        self.sparse_index.append(cur[0][0])
+        self.blocks.append(cur)
+        if compress:
+            self.size_bytes += len(zlib.compress(bytes(raw), 6))
+
+    def __len__(self) -> int:
+        return self.n
+
+    def __iter__(self) -> Iterator[Item]:
+        for b in self.blocks:
+            yield from b
+
+    def overlaps(self, lo: str, hi: str) -> bool:
+        return not (self.max_key < lo or self.min_key > hi)
+
+    def get(self, key: str, stats: Optional[dict] = None) -> Tuple[bool, Optional[str]]:
+        """(trouvé, valeur). Consulte le filtre de Bloom, puis l'index épars, puis un bloc."""
+        st = stats if stats is not None else {}
+        if self.n == 0 or key < self.min_key or key > self.max_key:
+            return False, None
+        if self.bloom is not None:
+            st["bloom_checks"] = st.get("bloom_checks", 0) + 1
+            if key not in self.bloom:
+                st["bloom_negatives"] = st.get("bloom_negatives", 0) + 1
+                return False, None
+        i = bisect.bisect_right(self.sparse_index, key) - 1
+        if i < 0:
+            return False, None
+        st["blocks_read"] = st.get("blocks_read", 0) + 1
+        block = self.blocks[i]
+        keys = [k for k, _ in block]
+        j = bisect.bisect_left(keys, key)
+        if j < len(keys) and keys[j] == key:
+            return True, block[j][1]
+        if self.bloom is not None:
+            st["bloom_false_positives"] = st.get("bloom_false_positives", 0) + 1
+        return False, None
+
+    def scan(self, lo: str, hi: str) -> Iterator[Item]:
+        i = max(0, bisect.bisect_right(self.sparse_index, lo) - 1)
+        for b in self.blocks[i:]:
+            for k, v in b:
+                if k > hi:
+                    return
+                if k >= lo:
+                    yield k, v
