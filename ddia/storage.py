@@ -429,3 +429,298 @@ class SSTable:
                     return
                 if k >= lo:
                     yield k, v
+
+
+def merge_runs(runs: Sequence[Iterable[Item]], drop_tombstones: bool = False) -> List[Item]:
+    """Fusion k-voies de séquences triées. `runs[0]` est la plus récente : pour une clé
+    présente plusieurs fois, seule la version la plus récente est gardée (comme le tri
+    fusion du livre). `drop_tombstones` : à utiliser quand on fusionne dans le niveau le
+    plus ancien (plus rien à masquer en dessous)."""
+    def tagged(run, age):
+        for k, v in run:
+            yield k, age, v
+
+    streams = [tagged(run, age) for age, run in enumerate(runs)]
+    out: List[Item] = []
+    last = None
+    for k, age, v in heapq.merge(*streams):
+        if k == last:
+            continue  # version plus ancienne de la même clé
+        last = k
+        if v is None and drop_tombstones:
+            continue
+        out.append((k, v))
+    return out
+
+
+# =====================================================================================
+# 6. Arbre LSM
+# =====================================================================================
+
+
+class LSMTree:
+    """Moteur LSM pédagogique.
+
+    Paramètres
+    ----------
+    memtable_bytes : taille de la memtable avant écriture sur disque ;
+    strategy : "leveled" (par niveaux), "tiered" (par paliers de taille) ou "none" ;
+    fanout : rapport de taille entre deux niveaux (leveled) ;
+    l0_trigger : nombre de SSTables en L0 déclenchant une compaction (leveled) ;
+    tier_size : nombre de SSTables d'un palier déclenchant leur fusion (tiered) ;
+    sstable_bytes : taille cible d'une SSTable produite par compaction (leveled) ;
+    bloom_bits_per_key : 0 pour désactiver les filtres de Bloom.
+
+    Les compteurs de `stats` permettent de mesurer l'amplification d'écriture
+    (octets écrits / octets demandés), de lecture (SSTables et blocs lus par requête) et
+    d'espace (octets sur disque / octets vivants).
+    """
+
+    def __init__(self, memtable_bytes: int = 64 * 1024, strategy: str = "leveled", fanout: int = 10,
+                 l0_trigger: int = 4, tier_size: int = 4, sstable_bytes: Optional[int] = None,
+                 block_bytes: int = 4096, bloom_bits_per_key: float = 10.0, wal: bool = True):
+        if strategy not in ("leveled", "tiered", "none"):
+            raise ValueError("strategy doit valoir 'leveled', 'tiered' ou 'none'")
+        self.memtable_bytes = memtable_bytes
+        self.strategy = strategy
+        self.fanout = fanout
+        self.l0_trigger = l0_trigger
+        self.tier_size = tier_size
+        self.sstable_bytes = sstable_bytes or memtable_bytes
+        self.block_bytes = block_bytes
+        self.bloom_bits = bloom_bits_per_key
+        self.use_wal = wal
+        self.memtable: Dict[str, Optional[str]] = {}
+        self._mem_bytes = 0
+        self.wal = bytearray()
+        # levels[0] : SSTables qui se chevauchent, la plus récente en premier.
+        # leveled : levels[i >= 1] = SSTables disjointes triées par clé.
+        # tiered : levels[i] = liste de runs (plus récent en premier) de taille comparable.
+        self.levels: List[List[SSTable]] = [[]]
+        self.stats = defaultdict(int)
+        self.history: List[dict] = []  # une ligne par événement (flush, compaction)
+        self._ptr: Dict[int, str] = {}  # pointeur de compaction tournant par niveau
+        self.n_ops = 0
+
+    # ------------------------------------------------------------------ écriture
+    def put(self, key: str, value: Optional[str]) -> None:
+        sz = record_size(key, value)
+        self.stats["user_bytes"] += sz
+        if self.use_wal:
+            self.wal += encode_record(key, value)
+            self.stats["wal_bytes"] += sz
+        old = self.memtable.get(key, "__absent__")
+        if old != "__absent__":
+            self._mem_bytes -= record_size(key, old)
+        self.memtable[key] = value
+        self._mem_bytes += sz
+        self.n_ops += 1
+        if self._mem_bytes >= self.memtable_bytes:
+            self.flush()
+
+    def delete(self, key: str) -> None:
+        self.put(key, None)
+
+    def flush(self) -> None:
+        """Écrit la memtable triée comme nouvelle SSTable de L0, vide le WAL."""
+        if not self.memtable:
+            return
+        items = sorted(self.memtable.items())
+        t = self._new_table(items)
+        self.stats["flush_bytes"] += t.size_bytes
+        self.stats["flushes"] += 1
+        self.levels[0].insert(0, t)
+        self.memtable = {}
+        self._mem_bytes = 0
+        self.wal = bytearray()
+        self._log("flush", t.size_bytes)
+        self._maybe_compact()
+
+    def _new_table(self, items) -> SSTable:
+        return SSTable(items, block_bytes=self.block_bytes, bloom_bits_per_key=self.bloom_bits)
+
+    def _log(self, event: str, nbytes: int) -> None:
+        self.history.append({"op": self.n_ops, "event": event, "bytes": nbytes,
+                             "written_total": self.bytes_written(), "n_sstables": self.n_sstables(),
+                             "disk_bytes": self.disk_bytes()})
+
+    # ---------------------------------------------------------------- compaction
+    def _maybe_compact(self) -> None:
+        if self.strategy == "leveled":
+            self._compact_leveled()
+        elif self.strategy == "tiered":
+            self._compact_tiered()
+
+    def _is_last_level(self, i: int) -> bool:
+        return all(not lv for lv in self.levels[i + 1:])
+
+    def _write_tables(self, items: List[Item], split: bool) -> List[SSTable]:
+        if not items:
+            return []
+        if not split:
+            return [self._new_table(items)]
+        out, cur, cur_b = [], [], 0
+        for k, v in items:
+            sz = record_size(k, v)
+            if cur and cur_b + sz > self.sstable_bytes:
+                out.append(self._new_table(cur))
+                cur, cur_b = [], 0
+            cur.append((k, v))
+            cur_b += sz
+        if cur:
+            out.append(self._new_table(cur))
+        return out
+
+    def _level_limit(self, i: int) -> int:
+        """Taille maximale du niveau i >= 1 (leveled) : base * fanout^(i-1)."""
+        base = self.l0_trigger * self.memtable_bytes
+        return base * self.fanout ** (i - 1)
+
+    def _compact_leveled(self) -> None:
+        while len(self.levels) < 2:
+            self.levels.append([])
+        if len(self.levels[0]) >= self.l0_trigger:
+            l0 = self.levels[0]
+            lo = min(t.min_key for t in l0)
+            hi = max(t.max_key for t in l0)
+            l1 = self.levels[1]
+            overl = [t for t in l1 if t.overlaps(lo, hi)]
+            keep = [t for t in l1 if not t.overlaps(lo, hi)]
+            items = merge_runs([list(t) for t in l0] + [_concat(overl)],
+                               drop_tombstones=self._is_last_level(1))
+            new = self._write_tables(items, split=True)
+            nb = sum(t.size_bytes for t in new)
+            self.stats["compaction_bytes"] += nb
+            self.stats["compaction_read_bytes"] += sum(t.size_bytes for t in l0 + overl)
+            self.stats["compactions"] += 1
+            self.levels[0] = []
+            self.levels[1] = sorted(keep + new, key=lambda t: t.min_key)
+            self._log("compaction L0->L1", nb)
+        i = 1
+        while i < len(self.levels):
+            lvl = self.levels[i]
+            if sum(t.size_bytes for t in lvl) > self._level_limit(i):
+                if i + 1 >= len(self.levels):
+                    self.levels.append([])
+                # choix tournant de la SSTable à descendre (pointeur de compaction)
+                ptr = self._ptr.get(i, "")
+                cand = [t for t in lvl if t.min_key > ptr]
+                victim = cand[0] if cand else lvl[0]
+                self._ptr[i] = victim.max_key
+                nxt = self.levels[i + 1]
+                overl = [t for t in nxt if t.overlaps(victim.min_key, victim.max_key)]
+                keep = [t for t in nxt if not t.overlaps(victim.min_key, victim.max_key)]
+                items = merge_runs([list(victim), _concat(overl)], drop_tombstones=self._is_last_level(i + 1))
+                new = self._write_tables(items, split=True)
+                nb = sum(t.size_bytes for t in new)
+                self.stats["compaction_bytes"] += nb
+                self.stats["compaction_read_bytes"] += victim.size_bytes + sum(t.size_bytes for t in overl)
+                self.stats["compactions"] += 1
+                lvl.remove(victim)
+                self.levels[i + 1] = sorted(keep + new, key=lambda t: t.min_key)
+                self._log(f"compaction L{i}->L{i + 1}", nb)
+            else:
+                i += 1
+
+    def _compact_tiered(self) -> None:
+        i = 0
+        while i < len(self.levels):
+            if len(self.levels[i]) >= self.tier_size:
+                if i + 1 >= len(self.levels):
+                    self.levels.append([])
+                runs = self.levels[i]
+                items = merge_runs([list(t) for t in runs], drop_tombstones=self._is_last_level(i))
+                new = self._write_tables(items, split=False)
+                nb = sum(t.size_bytes for t in new)
+                self.stats["compaction_bytes"] += nb
+                self.stats["compaction_read_bytes"] += sum(t.size_bytes for t in runs)
+                self.stats["compactions"] += 1
+                self.stats["peak_temp_bytes"] = max(self.stats["peak_temp_bytes"],
+                                                    self.disk_bytes() + nb)
+                self.levels[i] = []
+                self.levels[i + 1] = new + self.levels[i + 1]
+                self._log(f"compaction palier {i}->{i + 1}", nb)
+            i += 1
+
+    # ------------------------------------------------------------------- lecture
+    def _tables_in_read_order(self, key: Optional[str] = None) -> Iterator[SSTable]:
+        if self.strategy == "leveled":
+            yield from self.levels[0]
+            for lvl in self.levels[1:]:
+                if key is None:
+                    yield from lvl
+                    continue
+                idx = bisect.bisect_right([t.min_key for t in lvl], key) - 1
+                if idx >= 0 and lvl[idx].max_key >= key:
+                    yield lvl[idx]
+        else:
+            for lvl in self.levels:
+                yield from lvl
+
+    def get(self, key: str, stats: Optional[dict] = None) -> Optional[str]:
+        st = stats if stats is not None else self.stats
+        st["gets"] = st.get("gets", 0) + 1
+        if key in self.memtable:
+            return self.memtable[key]
+        for t in self._tables_in_read_order(key):
+            st["sstables_probed"] = st.get("sstables_probed", 0) + 1
+            found, v = t.get(key, st)
+            if found:
+                return v
+        return None
+
+    def scan(self, lo: str, hi: str) -> List[Tuple[str, str]]:
+        """Requête par intervalle : fusion de la memtable et de toutes les SSTables qui
+        chevauchent [lo, hi] (le filtre de Bloom ne sert à rien ici)."""
+        mem = sorted((k, v) for k, v in self.memtable.items() if lo <= k <= hi)
+        runs = [mem] + [list(t.scan(lo, hi)) for t in self._tables_in_read_order() if t.overlaps(lo, hi)]
+        self.stats["scan_runs"] += len(runs)
+        return [(k, v) for k, v in merge_runs(runs) if v is not None]
+
+    # --------------------------------------------------------------- métriques
+    def n_sstables(self) -> int:
+        return sum(len(lv) for lv in self.levels)
+
+    def disk_bytes(self) -> int:
+        return sum(t.size_bytes for lv in self.levels for t in lv) + len(self.wal)
+
+    def bytes_written(self) -> int:
+        s = self.stats
+        return s["wal_bytes"] + s["flush_bytes"] + s["compaction_bytes"]
+
+    def write_amplification(self) -> float:
+        return self.bytes_written() / max(1, self.stats["user_bytes"])
+
+    def live_bytes(self) -> int:
+        live: Dict[str, Optional[str]] = {}
+        for t in reversed(list(self._tables_in_read_order())):  # du plus ancien au plus récent
+            for k, v in t:
+                live[k] = v
+        live.update(self.memtable)
+        return sum(record_size(k, v) for k, v in live.items() if v is not None)
+
+    def space_amplification(self) -> float:
+        return self.disk_bytes() / max(1, self.live_bytes())
+
+    def level_sizes(self) -> List[Tuple[int, int]]:
+        """[(nombre de SSTables, octets)] par niveau."""
+        return [(len(lv), sum(t.size_bytes for t in lv)) for lv in self.levels]
+
+    # ------------------------------------------------------------ panne / reprise
+    def crash(self, keep_wal_bytes: Optional[int] = None) -> "LSMTree":
+        """Simule une panne : la memtable est perdue, le WAL (éventuellement tronqué à
+        `keep_wal_bytes`) et les SSTables survivent. Renvoie le moteur redémarré."""
+        wal = bytes(self.wal if keep_wal_bytes is None else self.wal[:keep_wal_bytes])
+        new = copy.copy(self)
+        new.levels = [list(lv) for lv in self.levels]
+        new.stats = defaultdict(int, self.stats)
+        new.memtable, new._mem_bytes = {}, 0
+        new.wal = bytearray()
+        replayed = 0
+        for _, k, v, size in iter_records(wal):
+            new.memtable[k] = v
+            new._mem_bytes += size
+            new.wal += encode_record(k, v)
+            replayed += 1
+        new.replayed = replayed
+        return new
