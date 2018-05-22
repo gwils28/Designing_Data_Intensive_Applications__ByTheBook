@@ -724,3 +724,297 @@ class LSMTree:
             replayed += 1
         new.replayed = replayed
         return new
+
+
+def _concat(tables: Sequence[SSTable]) -> List[Item]:
+    out: List[Item] = []
+    for t in sorted(tables, key=lambda t: t.min_key):
+        out.extend(t)
+    return out
+
+
+# =====================================================================================
+# 7. Arbre B+
+# =====================================================================================
+
+
+class SimulatedCrash(Exception):
+    """Levée quand une panne simulée interrompt une opération."""
+
+
+@dataclass
+class Page:
+    id: int
+    leaf: bool
+    keys: List = field(default_factory=list)
+    children: List[int] = field(default_factory=list)  # pages filles (nœud interne)
+    values: List = field(default_factory=list)          # valeurs (feuille)
+    next: Optional[int] = None                           # feuille voisine de droite
+
+
+class BPlusTree:
+    """Arbre B+ dont les nœuds sont des « pages » numérotées.
+
+    - `max_keys` : nombre maximal de clés par page (le facteur de branchement d'une page
+      interne est max_keys + 1) ;
+    - chaque recherche compte une lecture de page par niveau (`page_reads`) ;
+    - chaque modification marque des pages sales ; elles sont écrites immédiatement
+      (`checkpoint_every=1`) ou par lots tous les `checkpoint_every` opérations (cache de
+      pages), ce qui permet de mesurer l'amplification d'écriture ;
+    - `wal=True` : chaque opération écrit d'abord ses pages modifiées dans le journal
+      (journalisation physique simplifiée) ;
+    - `track_disk=True` : maintient une copie « disque » des pages pour simuler une panne
+      au milieu d'un éclatement (`insert(..., crash_after=j)`).
+    """
+
+    def __init__(self, max_keys: int = 4, page_bytes: int = 4096, record_bytes: int = 100,
+                 wal: bool = False, checkpoint_every: int = 1, track_disk: bool = False):
+        if max_keys < 3:
+            raise ValueError("max_keys >= 3")
+        self.max_keys = max_keys
+        self.page_bytes = page_bytes
+        self.record_bytes = record_bytes
+        self.use_wal = wal
+        self.checkpoint_every = checkpoint_every
+        self.track_disk = track_disk
+        self.pages: Dict[int, Page] = {}
+        self._next_id = 1  # la page 0 est la page « méta » qui désigne la racine
+        root = self._alloc(leaf=True)
+        self.root = root.id
+        self.page_reads = 0
+        self.page_writes = 0
+        self.wal_bytes = 0
+        self.user_bytes = 0
+        self.splits = 0
+        self.n_ops = 0
+        self._dirty: set = set()
+        self.disk: Dict[int, Page] = {}
+        self.wal_log: List[Tuple[int, Dict[int, Page]]] = []
+        self._op_trace: List[int] = []
+        if track_disk:
+            self.disk = {0: Page(0, True, keys=[self.root]), self.root: copy.deepcopy(root)}
+
+    # ----------------------------------------------------------------- pages
+    def _alloc(self, leaf: bool) -> Page:
+        p = Page(self._next_id, leaf)
+        self._next_id += 1
+        self.pages[p.id] = p
+        return p
+
+    def _mark(self, pid: int) -> None:
+        self._dirty.add(pid)
+
+    @property
+    def height(self) -> int:
+        h, p = 1, self.pages[self.root]
+        while not p.leaf:
+            p = self.pages[p.children[0]]
+            h += 1
+        return h
+
+    def __len__(self) -> int:
+        return sum(len(p.keys) for p in self.pages.values() if p.leaf)
+
+    # ------------------------------------------------------------- recherche
+    def _find_leaf(self, key, path: Optional[List[int]] = None) -> Page:
+        p = self.pages[self.root]
+        self.page_reads += 1
+        while not p.leaf:
+            if path is not None:
+                path.append(p.id)
+            i = bisect.bisect_right(p.keys, key)
+            p = self.pages[p.children[i]]
+            self.page_reads += 1
+        return p
+
+    def get(self, key):
+        leaf = self._find_leaf(key)
+        i = bisect.bisect_left(leaf.keys, key)
+        if i < len(leaf.keys) and leaf.keys[i] == key:
+            return leaf.values[i]
+        return None
+
+    def lookup_path(self, key) -> List[Tuple[int, List]]:
+        """Pages traversées pour trouver `key` : [(id, clés de la page)]."""
+        out, p = [], self.pages[self.root]
+        while True:
+            out.append((p.id, list(p.keys)))
+            if p.leaf:
+                return out
+            p = self.pages[p.children[bisect.bisect_right(p.keys, key)]]
+
+    def range(self, lo, hi) -> List[Tuple]:
+        """Parcours d'intervalle grâce aux pointeurs entre feuilles voisines."""
+        leaf = self._find_leaf(lo)
+        out = []
+        while leaf is not None:
+            for k, v in zip(leaf.keys, leaf.values):
+                if k > hi:
+                    return out
+                if k >= lo:
+                    out.append((k, v))
+            leaf = self.pages[leaf.next] if leaf.next is not None else None
+            if leaf is not None:
+                self.page_reads += 1
+        return out
+
+    def items(self) -> List[Tuple]:
+        p = self.pages[self.root]
+        while not p.leaf:
+            p = self.pages[p.children[0]]
+        out = []
+        while p is not None:
+            out.extend(zip(p.keys, p.values))
+            p = self.pages[p.next] if p.next is not None else None
+        return out
+
+    # -------------------------------------------------------------- insertion
+    def insert(self, key, value, crash_after: Optional[int] = None) -> None:
+        """Insère ou met à jour. `crash_after=j` (avec track_disk) : panne après que j
+        pages ont été écrites sur le « disque » pour cette opération."""
+        self.user_bytes += self.record_bytes
+        path: List[int] = []
+        leaf = self._find_leaf(key, path)
+        i = bisect.bisect_left(leaf.keys, key)
+        if i < len(leaf.keys) and leaf.keys[i] == key:
+            leaf.values[i] = value
+            self._mark(leaf.id)
+        else:
+            leaf.keys.insert(i, key)
+            leaf.values.insert(i, value)
+            self._mark(leaf.id)
+            if len(leaf.keys) > self.max_keys:
+                self._split(leaf, path)
+        self.n_ops += 1
+        if crash_after is not None or self.n_ops % self.checkpoint_every == 0:
+            self._write_dirty(crash_after)
+
+    def _split(self, node: Page, path: List[int]) -> None:
+        self.splits += 1
+        mid = len(node.keys) // 2
+        right = self._alloc(node.leaf)
+        if node.leaf:
+            right.keys, node.keys = node.keys[mid:], node.keys[:mid]
+            right.values, node.values = node.values[mid:], node.values[:mid]
+            right.next, node.next = node.next, right.id
+            sep = right.keys[0]
+        else:
+            sep = node.keys[mid]
+            right.keys, node.keys = node.keys[mid + 1:], node.keys[:mid]
+            right.children, node.children = node.children[mid + 1:], node.children[:mid + 1]
+        self._mark(node.id)
+        self._mark(right.id)
+        if path:
+            parent = self.pages[path.pop()]
+            j = bisect.bisect_right(parent.keys, sep)
+            parent.keys.insert(j, sep)
+            parent.children.insert(j + 1, right.id)
+            self._mark(parent.id)
+            if len(parent.keys) > self.max_keys:
+                self._split(parent, path)
+        else:
+            root = self._alloc(leaf=False)
+            root.keys = [sep]
+            root.children = [node.id, right.id]
+            self.root = root.id
+            self._mark(root.id)
+            self._mark(0)  # la page méta change : nouvelle racine
+
+    def _write_dirty(self, crash_after: Optional[int] = None) -> None:
+        # ordre d'écriture : les pages nouvelles et les feuilles d'abord, les parents et la
+        # page méta ensuite (l'ordre « naturel » d'un éclatement)
+        dirty = sorted(self._dirty, key=lambda pid: (pid == 0, not self.pages[pid].leaf if pid else True, -pid))
+        self._op_trace = list(dirty)
+        if self.use_wal:
+            images = {pid: copy.deepcopy(self.pages[pid]) if pid else Page(0, True, keys=[self.root])
+                      for pid in dirty}
+            self.wal_bytes += len(dirty) * self.page_bytes
+            if self.track_disk:
+                self.wal_log.append((self.n_ops, images))
+        for n, pid in enumerate(dirty):
+            if crash_after is not None and n >= crash_after:
+                self._dirty = set()
+                raise SimulatedCrash(f"panne après {crash_after} écriture(s) de page sur {len(dirty)}")
+            self.page_writes += 1
+            if self.track_disk:
+                self.disk[pid] = Page(0, True, keys=[self.root]) if pid == 0 else copy.deepcopy(self.pages[pid])
+        self._dirty = set()
+
+    def flush(self) -> None:
+        self._write_dirty()
+
+    def delete(self, key) -> bool:
+        """Suppression simple dans la feuille (sans fusion de pages, comme beaucoup de
+        moteurs qui laissent des pages partiellement vides)."""
+        leaf = self._find_leaf(key)
+        i = bisect.bisect_left(leaf.keys, key)
+        if i < len(leaf.keys) and leaf.keys[i] == key:
+            del leaf.keys[i]
+            del leaf.values[i]
+            self._mark(leaf.id)
+            self.n_ops += 1
+            if self.n_ops % self.checkpoint_every == 0:
+                self._write_dirty()
+            return True
+        return False
+
+    # ---------------------------------------------------- métriques et contrôle
+    def write_amplification(self) -> float:
+        return (self.page_writes * self.page_bytes + self.wal_bytes) / max(1, self.user_bytes)
+
+    def fill_factor(self) -> float:
+        leaves = [p for p in self.pages.values() if p.leaf]
+        return sum(len(p.keys) for p in leaves) / (len(leaves) * self.max_keys)
+
+    def level_counts(self) -> List[int]:
+        """Nombre de pages à chaque niveau, de la racine aux feuilles."""
+        out, frontier = [], [self.root]
+        while frontier:
+            out.append(len(frontier))
+            nxt = []
+            for pid in frontier:
+                p = self.pages[pid]
+                if not p.leaf:
+                    nxt.extend(p.children)
+            frontier = nxt
+        return out
+
+    @staticmethod
+    def check(pages: Dict[int, Page], root: int) -> dict:
+        """Vérifie un ensemble de pages (par exemple l'état du disque après une panne) :
+        clés atteignables depuis la racine, ordre respecté, pages orphelines."""
+        reach, keys_found, problems = set(), [], []
+
+        def walk(pid, lo, hi):
+            if pid not in pages:
+                problems.append(f"page {pid} référencée mais absente")
+                return
+            reach.add(pid)
+            p = pages[pid]
+            for k in p.keys:
+                if (lo is not None and k < lo) or (hi is not None and k >= hi):
+                    problems.append(f"clé {k} hors de l'intervalle de la page {pid}")
+            if p.leaf:
+                keys_found.extend(p.keys)
+                return
+            bounds = [lo] + list(p.keys) + [hi]
+            for j, c in enumerate(p.children):
+                walk(c, bounds[j], bounds[j + 1])
+
+        walk(root, None, None)
+        stored = {k for pid, p in pages.items() if pid and p.leaf for k in p.keys}
+        orphans = sorted(pid for pid in pages if pid and pid not in reach)
+        return {"cles_atteignables": len(keys_found), "cles_stockees": len(stored),
+                "cles_perdues": sorted(stored - set(keys_found)), "pages_orphelines": orphans,
+                "problemes": problems}
+
+    def disk_root(self) -> int:
+        return self.disk[0].keys[0]
+
+    def recover_from_wal(self) -> Dict[int, Page]:
+        """Rejoue toutes les images de pages du WAL sur l'état du disque."""
+        pages = {pid: copy.deepcopy(p) for pid, p in self.disk.items()}
+        for _, images in self.wal_log:
+            for pid, img in images.items():
+                pages[pid] = copy.deepcopy(img)
+        return pages
