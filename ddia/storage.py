@@ -1018,3 +1018,110 @@ class BPlusTree:
             for pid, img in images.items():
                 pages[pid] = copy.deepcopy(img)
         return pages
+
+
+def btree_capacity(page_bytes: int, key_bytes: int, ref_bytes: int = 8, levels: int = 4,
+                   fill: float = 1.0) -> dict:
+    """Facteur de branchement et capacité d'un B-tree (ordres de grandeur)."""
+    b = int(page_bytes * fill // (key_bytes + ref_bytes))
+    return {"branchement": b, "feuilles_max": b ** (levels - 1), "pages_max": b ** levels,
+            "octets_max": b ** levels * page_bytes}
+
+
+# =====================================================================================
+# 8. Modèle de disque
+# =====================================================================================
+
+#: caractéristiques typiques (ordres de grandeur) : latence d'une E/S aléatoire en
+#: secondes, débit séquentiel en octets/s, taille d'une page d'E/S
+DEVICES = {
+    "HDD": {"random_latency": 8e-3, "seq_bandwidth": 180e6, "page": 4096},
+    "SSD SATA": {"random_latency": 1.0e-4, "seq_bandwidth": 500e6, "page": 4096},
+    "SSD NVMe": {"random_latency": 2.0e-5, "seq_bandwidth": 3000e6, "page": 4096},
+}
+
+
+def io_time(device: str, n_random: int = 0, seq_bytes: int = 0) -> float:
+    """Temps (s) pour n_random E/S aléatoires d'une page et seq_bytes écrits en séquentiel."""
+    d = DEVICES[device]
+    return n_random * (d["random_latency"] + d["page"] / d["seq_bandwidth"]) + seq_bytes / d["seq_bandwidth"]
+
+
+# =====================================================================================
+# 9. Données synthétiques clé-valeur
+# =====================================================================================
+
+
+def zipf_keys(n_ops: int, n_keys: int, s: float = 1.0, seed: int = 0) -> np.ndarray:
+    """Indices de clés tirés selon une loi de Zipf tronquée (quelques clés très chaudes)."""
+    rng = np.random.default_rng(seed)
+    ranks = np.arange(1, n_keys + 1, dtype=float)
+    p = ranks ** -s
+    p /= p.sum()
+    perm = rng.permutation(n_keys)  # les clés chaudes ne sont pas les premières par ordre
+    return perm[rng.choice(n_keys, size=n_ops, p=p)]
+
+
+def kv_key(i: int) -> str:
+    return f"user{i:08d}"
+
+
+def kv_value(i: int, version: int = 0, size: int = 100) -> str:
+    base = f"v{version}:{i}:"
+    return (base * (size // len(base) + 1))[:size]
+
+
+# =====================================================================================
+# 10. Recherche plein texte
+# =====================================================================================
+
+_WORD = re.compile(r"\w+", re.UNICODE)
+
+
+def tokenize(text: str) -> List[str]:
+    return [w.lower() for w in _WORD.findall(text)]
+
+
+class InvertedIndex:
+    """Index inversé : terme -> liste triée des identifiants de documents (postings)."""
+
+    def __init__(self):
+        self.postings: Dict[str, List[int]] = defaultdict(list)
+        self.n_docs = 0
+
+    def add(self, doc_id: int, text: str) -> None:
+        for t in sorted(set(tokenize(text))):
+            lst = self.postings[t]
+            if not lst or lst[-1] < doc_id:
+                lst.append(doc_id)
+            else:
+                bisect.insort(lst, doc_id)
+        self.n_docs = max(self.n_docs, doc_id + 1)
+
+    def search_and(self, terms: Sequence[str]) -> Tuple[List[int], int]:
+        """Documents contenant tous les termes ; renvoie aussi le nombre de comparaisons
+        de l'intersection (on part de la liste la plus courte)."""
+        lists = sorted((self.postings.get(t.lower(), []) for t in terms), key=len)
+        if not lists:
+            return [], 0
+        res, comps = lists[0], 0
+        for other in lists[1:]:
+            i = j = 0
+            out = []
+            while i < len(res) and j < len(other):
+                comps += 1
+                if res[i] == other[j]:
+                    out.append(res[i])
+                    i += 1
+                    j += 1
+                elif res[i] < other[j]:
+                    i += 1
+                else:
+                    j += 1
+            res = out
+        return list(res), comps
+
+    def bitmap(self, term: str) -> np.ndarray:
+        b = np.zeros(self.n_docs, dtype=bool)
+        b[self.postings.get(term.lower(), [])] = True
+        return b
