@@ -1125,3 +1125,80 @@ class InvertedIndex:
         b = np.zeros(self.n_docs, dtype=bool)
         b[self.postings.get(term.lower(), [])] = True
         return b
+
+
+def levenshtein(a: str, b: str) -> int:
+    """Distance d'édition (insertions, suppressions, substitutions) par programmation
+    dynamique, O(len(a) * len(b))."""
+    prev = list(range(len(b) + 1))
+    for i, ca in enumerate(a, 1):
+        cur = [i]
+        for j, cb in enumerate(b, 1):
+            cur.append(min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + (ca != cb)))
+        prev = cur
+    return prev[-1]
+
+
+class Trie:
+    """Trie des termes du vocabulaire, avec recherche floue par distance d'édition.
+
+    La recherche descend dans le trie en calculant une ligne de la table de Levenshtein
+    par nœud ; une branche est abandonnée dès que le minimum de la ligne dépasse la
+    distance autorisée. C'est l'idée qui rend efficace l'automate de Levenshtein : on
+    n'examine qu'une petite partie du vocabulaire.
+    """
+
+    def __init__(self, words: Iterable[str] = ()):
+        self.root: dict = {}
+        self.n_nodes = 1
+        for w in words:
+            self.add(w)
+
+    def add(self, word: str) -> None:
+        node = self.root
+        for ch in word:
+            if ch not in node:
+                node[ch] = {}
+                self.n_nodes += 1
+            node = node[ch]
+        node["$"] = word
+
+    def fuzzy(self, word: str, max_dist: int) -> Tuple[List[Tuple[str, int]], int]:
+        """[(terme, distance)] à distance <= max_dist, et nombre de nœuds visités."""
+        results, visited = [], [0]
+        first = list(range(len(word) + 1))
+
+        def rec(node, row):
+            visited[0] += 1
+            if "$" in node and row[-1] <= max_dist:
+                results.append((node["$"], row[-1]))
+            if min(row) > max_dist:
+                return
+            for ch, child in node.items():
+                if ch == "$":
+                    continue
+                cur = [row[0] + 1]
+                for j in range(1, len(word) + 1):
+                    cur.append(min(cur[j - 1] + 1, row[j] + 1, row[j - 1] + (word[j - 1] != ch)))
+                rec(child, cur)
+
+        rec(self.root, first)
+        return sorted(results, key=lambda x: (x[1], x[0])), visited[0]
+
+
+_SYLLABLES = ["ba", "be", "bi", "bo", "ca", "ce", "ci", "co", "da", "de", "di", "do", "fa", "fe",
+              "la", "le", "li", "lo", "ma", "me", "mi", "mo", "na", "ne", "ni", "no", "pa", "pe",
+              "pi", "po", "ra", "re", "ri", "ro", "sa", "se", "si", "so", "ta", "te", "ti", "to",
+              "va", "ve", "vi", "vo", "tion", "ment", "eur", "ais", "ent", "ique", "ard", "on"]
+
+
+def make_vocabulary(n_words: int, seed: int = 0) -> List[str]:
+    """Vocabulaire synthétique de mots « prononçables » (2 à 4 syllabes), distincts."""
+    rng = np.random.default_rng(seed)
+    words, seen = [], set()
+    while len(words) < n_words:
+        w = "".join(rng.choice(_SYLLABLES, size=rng.integers(2, 5)))
+        if w not in seen:
+            seen.add(w)
+            words.append(w)
+    return words
