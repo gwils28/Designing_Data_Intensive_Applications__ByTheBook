@@ -1202,3 +1202,73 @@ def make_vocabulary(n_words: int, seed: int = 0) -> List[str]:
             seen.add(w)
             words.append(w)
     return words
+
+
+def make_documents(n_docs: int, vocab: Sequence[str], words_per_doc: int = 40, s: float = 1.1,
+                   seed: int = 0) -> List[str]:
+    """Documents synthétiques dont les mots suivent une loi de Zipf (comme le langage)."""
+    rng = np.random.default_rng(seed)
+    ranks = np.arange(1, len(vocab) + 1, dtype=float)
+    p = ranks ** -s
+    p /= p.sum()
+    idx = rng.choice(len(vocab), size=(n_docs, words_per_doc), p=p)
+    return [" ".join(vocab[i] for i in row) for row in idx]
+
+
+# =====================================================================================
+# 11. Index multidimensionnels : courbe de Morton (ordre Z)
+# =====================================================================================
+
+
+def _spread_bits(v: np.ndarray) -> np.ndarray:
+    v = v.astype(np.uint64) & np.uint64(0xFFFF)
+    v = (v | (v << np.uint64(8))) & np.uint64(0x00FF00FF)
+    v = (v | (v << np.uint64(4))) & np.uint64(0x0F0F0F0F)
+    v = (v | (v << np.uint64(2))) & np.uint64(0x33333333)
+    v = (v | (v << np.uint64(1))) & np.uint64(0x55555555)
+    return v
+
+
+def zorder(x, y) -> np.ndarray:
+    """Code de Morton de coordonnées entières 16 bits : les bits de x et y sont
+    entrelacés, de sorte que des points proches ont souvent des codes proches."""
+    x = np.asarray(x)
+    y = np.asarray(y)
+    return _spread_bits(x) | (_spread_bits(y) << np.uint64(1))
+
+
+# =====================================================================================
+# 12. Stockage en colonnes
+# =====================================================================================
+
+
+def rle_encode(values) -> Tuple[np.ndarray, np.ndarray]:
+    """Codage par plages (run-length) : (valeurs, longueurs des plages)."""
+    a = np.asarray(values)
+    if a.size == 0:
+        return a[:0], np.zeros(0, dtype=np.int64)
+    change = np.flatnonzero(a[1:] != a[:-1]) + 1
+    starts = np.concatenate(([0], change))
+    lengths = np.diff(np.concatenate((starts, [a.size])))
+    return a[starts], lengths
+
+
+def rle_decode(vals, lengths) -> np.ndarray:
+    return np.repeat(np.asarray(vals), np.asarray(lengths))
+
+
+def dict_encode(values) -> Tuple[np.ndarray, np.ndarray]:
+    """Codage par dictionnaire : (dictionnaire trié des valeurs distinctes, codes entiers)."""
+    uniq, codes = np.unique(np.asarray(values), return_inverse=True)
+    return uniq, codes.astype(np.int64)
+
+
+def bits_for(n_distinct: int) -> int:
+    """Nombre de bits pour coder n valeurs distinctes."""
+    return max(1, math.ceil(math.log2(max(2, n_distinct))))
+
+
+def bitmap_index(values) -> Dict:
+    """Un bitmap (tableau booléen) par valeur distincte de la colonne."""
+    a = np.asarray(values)
+    return {v: a == v for v in np.unique(a)}
