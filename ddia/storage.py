@@ -1272,3 +1272,105 @@ def bitmap_index(values) -> Dict:
     """Un bitmap (tableau booléen) par valeur distincte de la colonne."""
     a = np.asarray(values)
     return {v: a == v for v in np.unique(a)}
+
+
+def bitmap_rle_runs(bitmap: np.ndarray) -> List[int]:
+    """Bitmap encodé comme dans le livre : longueurs alternées de 0 puis de 1 (on commence
+    toujours par une plage de 0, éventuellement vide)."""
+    vals, lens = rle_encode(bitmap.astype(np.int8))
+    runs = list(lens)
+    if vals.size and vals[0] == 1:
+        runs = [0] + runs
+    return [int(r) for r in runs]
+
+
+def varint_size(n: int) -> int:
+    """Octets d'un entier positif en encodage varint (7 bits utiles par octet)."""
+    return max(1, math.ceil(max(1, int(n)).bit_length() / 7))
+
+
+def make_sales(n_rows: int, n_products: int = 500, n_stores: int = 40, n_days: int = 365,
+               n_customers: int = 20000, n_extra_cols: int = 20, seed: int = 0):
+    """Table de faits de ventes synthétique (schéma en étoile) et ses dimensions.
+
+    Renvoie (fact_sales, dim_product, dim_date, dim_store) en DataFrames pandas. Les ventes
+    arrivent dans l'ordre chronologique ; produits et magasins suivent des lois de Zipf.
+    `n_extra_cols` colonnes supplémentaires imitent la largeur des vraies tables de faits.
+    """
+    import pandas as pd
+
+    rng = np.random.default_rng(seed)
+    cats = ["Fruits frais", "Confiserie", "Boulangerie", "Crèmerie", "Boissons", "Épicerie",
+            "Hygiène", "Surgelés"]
+    dim_product = pd.DataFrame({
+        "product_sk": np.arange(n_products),
+        "sku": [f"SKU{i:05d}" for i in range(n_products)],
+        "category": rng.choice(cats, size=n_products),
+        "brand": rng.choice([f"Marque {c}" for c in "ABCDEFGHIJ"], size=n_products),
+        "unit_price": np.round(rng.lognormal(1.0, 0.7, size=n_products), 2),
+    })
+    dates = pd.date_range("2017-01-01", periods=n_days, freq="D")
+    dim_date = pd.DataFrame({"date_key": np.arange(n_days), "date": dates,
+                             "year": dates.year, "month": dates.month,
+                             "weekday": dates.day_name(), "is_holiday": rng.random(n_days) < 0.03})
+    dim_store = pd.DataFrame({"store_sk": np.arange(n_stores),
+                              "city": rng.choice(["Paris", "Lyon", "Lille", "Nantes", "Toulouse",
+                                                  "Marseille", "Rennes", "Bordeaux"], size=n_stores),
+                              "surface_m2": rng.integers(200, 3000, size=n_stores)})
+
+    def zipf_idx(n, size, s):
+        p = np.arange(1, n + 1, dtype=float) ** -s
+        p /= p.sum()
+        return rng.permutation(n)[rng.choice(n, size=size, p=p)]
+
+    date_key = np.sort(rng.integers(0, n_days, size=n_rows))
+    product = zipf_idx(n_products, n_rows, 1.05)
+    store = zipf_idx(n_stores, n_rows, 0.6)
+    qty = rng.geometric(0.45, size=n_rows)
+    price = dim_product["unit_price"].to_numpy()[product]
+    promo = np.where(rng.random(n_rows) < 0.15, rng.integers(1, 12, size=n_rows), 0)
+    fact = pd.DataFrame({
+        "date_key": date_key, "product_sk": product, "store_sk": store,
+        "promotion_sk": promo, "customer_sk": rng.integers(0, n_customers, size=n_rows),
+        "quantity": qty, "net_price": np.round(price * qty, 2),
+        "discount_price": np.round(price * qty * np.where(promo > 0, 0.9, 1.0), 2),
+    })
+    for j in range(n_extra_cols):
+        fact[f"attr_{j:02d}"] = rng.integers(0, 1000, size=n_rows)
+    return fact, dim_product, dim_date, dim_store
+
+
+def data_cube(df, dims: Sequence[str], measure: str, agg: str = "sum") -> Dict[Tuple[str, ...], object]:
+    """Treillis complet des agrégats : un group-by pour chaque sous-ensemble de `dims`
+    (2^d vues), y compris le total général (clé ())."""
+    out = {}
+    for r in range(len(dims), -1, -1):
+        for sub in combinations(dims, r):
+            if sub:
+                out[sub] = df.groupby(list(sub))[measure].agg(agg)
+            else:
+                out[()] = getattr(df[measure], agg)()
+    return out
+
+
+# =====================================================================================
+# 13. Exécution de requêtes : interprétation et compilation
+# =====================================================================================
+
+def plain_log_ticks(ax, axis: str = "y") -> None:
+    """Graduations lisibles (1, 10, 100, 0,01...) sur un axe logarithmique, sans passer
+    par mathtext (dont la police par défaut du dépôt n'a pas le signe moins U+2212)."""
+    from matplotlib.ticker import FuncFormatter, LogLocator, NullFormatter
+
+    def fmt(v, _pos=None):
+        if v <= 0:
+            return ""
+        if v >= 1:
+            return f"{v:,.0f}".replace(",", " ")
+        return f"{v:.10f}".rstrip("0").replace(".", ",")
+
+    for a in (["x", "y"] if axis == "both" else [axis]):
+        target = ax.xaxis if a == "x" else ax.yaxis
+        target.set_major_locator(LogLocator(base=10))
+        target.set_major_formatter(FuncFormatter(fmt))
+        target.set_minor_formatter(NullFormatter())
