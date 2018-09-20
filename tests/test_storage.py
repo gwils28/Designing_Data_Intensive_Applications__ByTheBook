@@ -109,3 +109,98 @@ def test_lsm_correct_quelle_que_soit_la_strategie(strategy):
     expected = sorted((k, v) for k, v in ref.items() if lo <= k <= hi and v is not None)
     assert lsm.scan(lo, hi) == expected
     assert lsm.write_amplification() > 1
+
+
+def test_lsm_niveaux_disjoints_et_amplification():
+    lsm = S.LSMTree(memtable_bytes=8 * 1024, strategy="leveled", fanout=4)
+    for n, i in enumerate(S.zipf_keys(15000, 5000, s=0.5, seed=0)):
+        lsm.put(S.kv_key(int(i)), S.kv_value(int(i), n))
+    for lvl in lsm.levels[1:]:
+        for a, b in zip(lvl, lvl[1:]):
+            assert a.max_key < b.min_key
+    tiered = S.LSMTree(memtable_bytes=8 * 1024, strategy="tiered")
+    for n, i in enumerate(S.zipf_keys(15000, 5000, s=0.5, seed=0)):
+        tiered.put(S.kv_key(int(i)), S.kv_value(int(i), n))
+    assert tiered.write_amplification() < lsm.write_amplification()
+    assert lsm.space_amplification() < tiered.space_amplification()
+
+
+def test_lsm_reprise_depuis_le_wal():
+    lsm = S.LSMTree(memtable_bytes=1 << 20)
+    for i in range(50):
+        lsm.put(S.kv_key(i), S.kv_value(i))
+    full = lsm.crash()
+    assert full.replayed == 50 and full.get(S.kv_key(49)) == S.kv_value(49)
+    cut = lsm.crash(keep_wal_bytes=len(lsm.wal) - 5)  # dernier enregistrement à moitié écrit
+    assert cut.replayed == 49 and cut.get(S.kv_key(49)) is None
+
+
+# --------------------------------------------------------------------------- B-tree
+def test_btree_insertion_recherche_intervalle():
+    bt = S.BPlusTree(max_keys=8)
+    keys = list(range(5000))
+    random.Random(1).shuffle(keys)
+    for k in keys:
+        bt.insert(k, -k)
+    assert len(bt) == 5000
+    assert bt.get(1234) == -1234 and bt.get(99999) is None
+    assert [k for k, _ in bt.range(100, 110)] == list(range(100, 111))
+    assert [k for k, _ in bt.items()] == list(range(5000))
+    assert 4 <= bt.height <= 6
+    assert 0.6 < bt.fill_factor() < 0.8  # environ ln 2 pour des insertions aléatoires
+    assert BPlusTree_ok(bt)
+
+
+def BPlusTree_ok(bt):
+    r = S.BPlusTree.check(bt.pages, bt.root)
+    return not r["problemes"] and not r["cles_perdues"] and not r["pages_orphelines"]
+
+
+def test_btree_panne_pendant_un_eclatement_et_wal():
+    bt = S.BPlusTree(max_keys=4, track_disk=True)
+    for k in [10, 20, 30, 40]:
+        bt.insert(k, k)
+    with pytest.raises(S.SimulatedCrash):
+        bt.insert(25, 25, crash_after=2)
+    r = S.BPlusTree.check(bt.disk, bt.disk_root())
+    assert r["cles_perdues"] and r["pages_orphelines"]
+    bt = S.BPlusTree(max_keys=4, track_disk=True, wal=True)
+    for k in [10, 20, 30, 40]:
+        bt.insert(k, k)
+    with pytest.raises(S.SimulatedCrash):
+        bt.insert(25, 25, crash_after=2)
+    pages = bt.recover_from_wal()
+    r = S.BPlusTree.check(pages, pages[0].keys[0])
+    assert r["cles_atteignables"] == 5 and not r["cles_perdues"]
+
+
+def test_btree_amplification_et_cache():
+    direct = S.BPlusTree(max_keys=32, page_bytes=4096, record_bytes=100)
+    cached = S.BPlusTree(max_keys=32, page_bytes=4096, record_bytes=100, checkpoint_every=500)
+    for k in random.Random(2).sample(range(100000), 5000):
+        direct.insert(k, k)
+        cached.insert(k, k)
+    assert direct.write_amplification() > 40
+    assert cached.write_amplification() < direct.write_amplification() / 2
+
+
+def test_capacite_btree():
+    c = S.btree_capacity(4096, key_bytes=0, ref_bytes=8)
+    assert c["branchement"] == 512
+    assert S.btree_capacity(4096, 0, 8192 // 1000)["branchement"] >= 500
+
+
+def test_modele_disque():
+    assert S.io_time("HDD", n_random=100) > 100 * S.io_time("SSD NVMe", n_random=1)
+    assert S.io_time("HDD", seq_bytes=180e6) == pytest.approx(1.0)
+
+
+# ------------------------------------------------------------------- plein texte
+def test_index_inverse_et_intersection():
+    idx = S.InvertedIndex()
+    docs = ["pommes rouges et poires", "pommes vertes", "cerises rouges", "Pommes ROUGES"]
+    for i, d in enumerate(docs):
+        idx.add(i, d)
+    res, comps = idx.search_and(["rouges", "pommes"])
+    assert res == [0, 3] and comps > 0
+    assert (idx.bitmap("rouges") & idx.bitmap("pommes")).nonzero()[0].tolist() == [0, 3]
