@@ -204,3 +204,55 @@ def test_index_inverse_et_intersection():
     res, comps = idx.search_and(["rouges", "pommes"])
     assert res == [0, 3] and comps > 0
     assert (idx.bitmap("rouges") & idx.bitmap("pommes")).nonzero()[0].tolist() == [0, 3]
+
+
+def test_levenshtein_et_trie():
+    assert S.levenshtein("chat", "chats") == 1
+    assert S.levenshtein("kitten", "sitting") == 3
+    vocab = S.make_vocabulary(3000, seed=0)
+    trie = S.Trie(vocab)
+    w = vocab[123]
+    q = w[:-1] + ("x" if w[-1] != "x" else "y")
+    res, visited = trie.fuzzy(q, 1)
+    brute = sorted((v, S.levenshtein(q, v)) for v in vocab if S.levenshtein(q, v) <= 1)
+    assert sorted(res) == brute and (w, 1) in res
+    assert visited < trie.n_nodes / 3
+
+
+def test_documents_synthetiques():
+    vocab = S.make_vocabulary(500, seed=1)
+    docs = S.make_documents(50, vocab, words_per_doc=20)
+    assert len(docs) == 50 and all(len(d.split()) == 20 for d in docs)
+
+
+def test_zorder():
+    assert S.zorder(0b11, 0b00) == 0b0101
+    assert S.zorder(0b00, 0b11) == 0b1010
+    x = np.array([3, 1]); y = np.array([5, 2])
+    assert list(S.zorder(x, y)) == [S.zorder(3, 5), S.zorder(1, 2)]
+
+
+# ---------------------------------------------------------------------- colonnes
+def test_rle_dictionnaire_bitmaps():
+    a = np.array([5, 5, 5, 2, 2, 7, 5, 5])
+    v, l = S.rle_encode(a)
+    assert v.tolist() == [5, 2, 7, 5] and l.tolist() == [3, 2, 1, 2]
+    assert S.rle_decode(v, l).tolist() == a.tolist()
+    d, codes = S.dict_encode(np.array(["b", "a", "b"]))
+    assert d.tolist() == ["a", "b"] and codes.tolist() == [1, 0, 1]
+    bm = S.bitmap_index(a)
+    assert bm[2].tolist() == [0, 0, 0, 1, 1, 0, 0, 0]
+    assert S.bitmap_rle_runs(bm[2]) == [3, 2, 3]
+    assert S.bitmap_rle_runs(bm[5]) == [0, 3, 3, 2]
+    assert S.bits_for(100000) == 17
+    assert S.varint_size(127) == 1 and S.varint_size(128) == 2
+
+
+def test_make_sales_et_cube():
+    fact, prod, date, store = S.make_sales(5000, n_extra_cols=3, seed=0)
+    assert len(fact) == 5000 and fact["date_key"].is_monotonic_increasing
+    assert set(fact["product_sk"]).issubset(set(prod["product_sk"]))
+    cube = S.data_cube(fact, ["date_key", "product_sk", "store_sk"], "net_price")
+    assert len(cube) == 8
+    assert cube[()] == pytest.approx(fact["net_price"].sum())
+    assert cube[("store_sk",)].sum() == pytest.approx(fact["net_price"].sum())
