@@ -121,3 +121,134 @@ def decode_uvarint(buf: bytes, pos: int = 0) -> Tuple[int, int]:
         if not b & 0x80:
             return result, pos
         shift += 7
+
+
+def uvarint_size(n: int) -> int:
+    """Nombre d'octets du varint de n (>= 0) : max(1, ceil(bits / 7))."""
+    return max(1, (int(n).bit_length() + 6) // 7)
+
+
+def zigzag_encode(n: int) -> int:
+    """Entier signé -> non signé : 0, -1, 1, -2, 2... deviennent 0, 1, 2, 3, 4..."""
+    return 2 * n if n >= 0 else -2 * n - 1
+
+
+def zigzag_decode(z: int) -> int:
+    return (z >> 1) if not z & 1 else -((z + 1) >> 1)
+
+
+def encode_svarint(n: int) -> bytes:
+    """Entier signé : zigzag puis varint (sint64 de Protocol Buffers, long d'Avro)."""
+    return encode_uvarint(zigzag_encode(n))
+
+
+def decode_svarint(buf: bytes, pos: int = 0) -> Tuple[int, int]:
+    z, pos = decode_uvarint(buf, pos)
+    return zigzag_decode(z), pos
+
+
+def _twos(n: int, bits: int = 64) -> int:
+    """Représentation en complément à deux sur `bits` bits (entier non signé)."""
+    return n & ((1 << bits) - 1)
+
+
+def _signed(u: int, bits: int) -> int:
+    """Interprète les `bits` bits de poids faible de u comme un entier signé."""
+    u &= (1 << bits) - 1
+    return u - (1 << bits) if u >> (bits - 1) else u
+
+
+# =====================================================================================
+# JSON et MessagePack
+# =====================================================================================
+
+#: l'enregistrement d'exemple du chapitre
+EXAMPLE_RECORD = {"userName": "Martin", "favoriteNumber": 1337, "interests": ["daydreaming", "hacking"]}
+
+
+def json_bytes(obj: Any, pretty: bool = False) -> bytes:
+    """JSON en UTF-8, sans espaces superflus (ou indenté si pretty=True)."""
+    if pretty:
+        return json.dumps(obj, indent=2, ensure_ascii=False).encode()
+    return json.dumps(obj, separators=(",", ":"), ensure_ascii=False).encode()
+
+
+def _mp_str(out: _Out, s: str, role: str) -> None:
+    b = s.encode("utf-8")
+    n = len(b)
+    if n < 32:
+        out.put(bytes([0xA0 | n]), "length", f"str({n})")
+    elif n < 256:
+        out.put(bytes([0xD9, n]), "length", f"str8({n})")
+    elif n < 65536:
+        out.put(b"\xda" + struct.pack(">H", n), "length", f"str16({n})")
+    else:
+        out.put(b"\xdb" + struct.pack(">I", n), "length", f"str32({n})")
+    out.put(b, role, s)
+
+
+def _mp(out: _Out, obj: Any, role_str: str = "str") -> None:
+    if obj is None:
+        out.put(b"\xc0", "other", "nil")
+    elif obj is True or obj is False:
+        out.put(b"\xc3" if obj else b"\xc2", "int", str(obj).lower())
+    elif isinstance(obj, int):
+        n = obj
+        if 0 <= n < 128:
+            out.put(bytes([n]), "int", str(n))
+        elif -32 <= n < 0:
+            out.put(struct.pack(">b", n), "int", str(n))
+        elif 0 <= n < 1 << 8:
+            out.put(b"\xcc", "header", "uint8"); out.put(struct.pack(">B", n), "int", str(n))
+        elif 0 <= n < 1 << 16:
+            out.put(b"\xcd", "header", "uint16"); out.put(struct.pack(">H", n), "int", str(n))
+        elif 0 <= n < 1 << 32:
+            out.put(b"\xce", "header", "uint32"); out.put(struct.pack(">I", n), "int", str(n))
+        elif 0 <= n < 1 << 64:
+            out.put(b"\xcf", "header", "uint64"); out.put(struct.pack(">Q", n), "int", str(n))
+        elif -(1 << 7) <= n:
+            out.put(b"\xd0", "header", "int8"); out.put(struct.pack(">b", n), "int", str(n))
+        elif -(1 << 15) <= n:
+            out.put(b"\xd1", "header", "int16"); out.put(struct.pack(">h", n), "int", str(n))
+        elif -(1 << 31) <= n:
+            out.put(b"\xd2", "header", "int32"); out.put(struct.pack(">i", n), "int", str(n))
+        else:
+            out.put(b"\xd3", "header", "int64"); out.put(struct.pack(">q", n), "int", str(n))
+    elif isinstance(obj, float):
+        out.put(b"\xcb", "header", "float64"); out.put(struct.pack(">d", obj), "int", repr(obj))
+    elif isinstance(obj, str):
+        _mp_str(out, obj, role_str)
+    elif isinstance(obj, (bytes, bytearray)):
+        n = len(obj)
+        if n < 256:
+            out.put(bytes([0xC4, n]), "length", f"bin8({n})")
+        elif n < 65536:
+            out.put(b"\xc5" + struct.pack(">H", n), "length", f"bin16({n})")
+        else:
+            out.put(b"\xc6" + struct.pack(">I", n), "length", f"bin32({n})")
+        out.put(bytes(obj), "str", f"{n} octets")
+    elif isinstance(obj, (list, tuple)):
+        n = len(obj)
+        if n < 16:
+            out.put(bytes([0x90 | n]), "header", f"array({n})")
+        elif n < 65536:
+            out.put(b"\xdc" + struct.pack(">H", n), "header", f"array16({n})")
+        else:
+            out.put(b"\xdd" + struct.pack(">I", n), "header", f"array32({n})")
+        for x in obj:
+            _mp(out, x)
+    elif isinstance(obj, dict):
+        n = len(obj)
+        if n < 16:
+            out.put(bytes([0x80 | n]), "header", f"map({n})")
+        elif n < 65536:
+            out.put(b"\xde" + struct.pack(">H", n), "header", f"map16({n})")
+        else:
+            out.put(b"\xdf" + struct.pack(">I", n), "header", f"map32({n})")
+        for k, v in obj.items():
+            if not isinstance(k, str):
+                raise TypeError("ce MessagePack minimal n'accepte que des clés chaînes")
+            _mp_str(out, k, "name")
+            _mp(out, v)
+    else:
+        raise TypeError(f"type non pris en charge : {type(obj).__name__}")
