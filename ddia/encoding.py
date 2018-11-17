@@ -252,3 +252,90 @@ def _mp(out: _Out, obj: Any, role_str: str = "str") -> None:
             _mp(out, v)
     else:
         raise TypeError(f"type non pris en charge : {type(obj).__name__}")
+
+
+def msgpack_encode(obj: Any, trace: Optional[list] = None) -> bytes:
+    """Encode un objet JSON (dict, list, str, int, float, bool, None, bytes) en MessagePack."""
+    out = _Out(trace)
+    _mp(out, obj)
+    return bytes(out.buf)
+
+
+def msgpack_decode(buf: bytes) -> Any:
+    obj, pos = _mp_read(buf, 0)
+    if pos != len(buf):
+        raise ValueError("octets en trop après l'objet MessagePack")
+    return obj
+
+
+def _mp_read(b: bytes, p: int) -> Tuple[Any, int]:
+    t = b[p]
+    p += 1
+    if t < 0x80:
+        return t, p
+    if 0x80 <= t <= 0x8F:
+        return _mp_map(b, p, t & 0x0F)
+    if 0x90 <= t <= 0x9F:
+        return _mp_arr(b, p, t & 0x0F)
+    if 0xA0 <= t <= 0xBF:
+        n = t & 0x1F
+        return b[p:p + n].decode(), p + n
+    if t >= 0xE0:
+        return t - 256, p
+    fixed = {0xCC: ">B", 0xCD: ">H", 0xCE: ">I", 0xCF: ">Q", 0xD0: ">b", 0xD1: ">h", 0xD2: ">i",
+             0xD3: ">q", 0xCB: ">d", 0xCA: ">f"}
+    if t in fixed:
+        fmt = fixed[t]
+        size = struct.calcsize(fmt)
+        return struct.unpack(fmt, b[p:p + size])[0], p + size
+    if t == 0xC0:
+        return None, p
+    if t in (0xC2, 0xC3):
+        return t == 0xC3, p
+    lens = {0xD9: ">B", 0xDA: ">H", 0xDB: ">I", 0xC4: ">B", 0xC5: ">H", 0xC6: ">I",
+            0xDC: ">H", 0xDD: ">I", 0xDE: ">H", 0xDF: ">I"}
+    if t in lens:
+        fmt = lens[t]
+        size = struct.calcsize(fmt)
+        n = struct.unpack(fmt, b[p:p + size])[0]
+        p += size
+        if t in (0xD9, 0xDA, 0xDB):
+            return b[p:p + n].decode(), p + n
+        if t in (0xC4, 0xC5, 0xC6):
+            return bytes(b[p:p + n]), p + n
+        if t in (0xDC, 0xDD):
+            return _mp_arr(b, p, n)
+        return _mp_map(b, p, n)
+    raise ValueError(f"octet de type MessagePack inconnu : 0x{t:02x}")
+
+
+def _mp_arr(b, p, n):
+    out = []
+    for _ in range(n):
+        x, p = _mp_read(b, p)
+        out.append(x)
+    return out, p
+
+
+def _mp_map(b, p, n):
+    out = {}
+    for _ in range(n):
+        k, p = _mp_read(b, p)
+        v, p = _mp_read(b, p)
+        out[k] = v
+    return out, p
+
+
+# =====================================================================================
+# Protocol Buffers (simplifié, syntaxe proto3)
+# =====================================================================================
+
+#: types d'onde (wire types) : 0 varint, 1 64 bits fixe, 2 longueur préfixée, 5 32 bits fixe
+WIRE_TYPE = {
+    "int32": 0, "int64": 0, "uint32": 0, "uint64": 0, "sint32": 0, "sint64": 0, "bool": 0,
+    "enum": 0, "fixed64": 1, "sfixed64": 1, "double": 1, "string": 2, "bytes": 2,
+    "fixed32": 5, "sfixed32": 5, "float": 5,
+}
+
+
+_WT_NAME = {0: "VAR", 1: "I64", 2: "LEN", 5: "I32"}
