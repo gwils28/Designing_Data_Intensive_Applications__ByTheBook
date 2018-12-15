@@ -339,3 +339,76 @@ WIRE_TYPE = {
 
 
 _WT_NAME = {0: "VAR", 1: "I64", 2: "LEN", 5: "I32"}
+
+
+@dataclass
+class PbField:
+    name: str
+    tag: int
+    type: Any  # nom de type (str) ou PbMessage pour un message imbriqué
+    repeated: bool = False
+
+
+@dataclass
+class PbMessage:
+    name: str
+    fields: List[PbField]
+    reserved: List[int] = field(default_factory=list)
+
+    def by_tag(self) -> Dict[int, PbField]:
+        return {f.tag: f for f in self.fields}
+
+    def to_proto(self) -> str:
+        """Texte du schéma dans la syntaxe de l'IDL Protocol Buffers."""
+        lines = [f"message {self.name} {{"]
+        for f in self.fields:
+            t = f.type.name if isinstance(f.type, PbMessage) else f.type
+            lines.append(f"    {'repeated ' if f.repeated else ''}{t} {f.name} = {f.tag};")
+        if self.reserved:
+            lines.append(f"    reserved {', '.join(map(str, self.reserved))};")
+        lines.append("}")
+        return "\n".join(lines)
+
+
+#: le schéma Person du chapitre
+PERSON_PB = PbMessage("Person", [
+    PbField("user_name", 1, "string"),
+    PbField("favorite_number", 2, "int64"),
+    PbField("interests", 3, "string", repeated=True),
+])
+
+#: correspondance entre les noms de l'exemple JSON et ceux du schéma Protocol Buffers
+PB_NAMES = {"userName": "user_name", "favoriteNumber": "favorite_number", "interests": "interests"}
+
+
+def to_pb_record(rec: dict) -> dict:
+    """Renomme les champs camelCase de l'exemple en snake_case (convention protobuf)."""
+    return {PB_NAMES.get(k, k): v for k, v in rec.items()}
+
+
+def _wt(f: PbField) -> int:
+    return 2 if isinstance(f.type, PbMessage) else WIRE_TYPE[f.type]
+
+
+def _pb_scalar(t: str, v: Any) -> bytes:
+    if t in ("int32", "int64", "enum"):
+        return encode_uvarint(_twos(int(v)))          # négatif : 10 octets
+    if t in ("uint32", "uint64"):
+        return encode_uvarint(int(v))
+    if t in ("sint32", "sint64"):
+        return encode_svarint(int(v))
+    if t == "bool":
+        return b"\x01" if v else b"\x00"
+    if t == "double":
+        return struct.pack("<d", v)
+    if t == "float":
+        return struct.pack("<f", v)
+    if t == "fixed64":
+        return struct.pack("<Q", v)
+    if t == "sfixed64":
+        return struct.pack("<q", v)
+    if t == "fixed32":
+        return struct.pack("<I", v)
+    if t == "sfixed32":
+        return struct.pack("<i", v)
+    raise ValueError(f"type scalaire inconnu : {t}")
