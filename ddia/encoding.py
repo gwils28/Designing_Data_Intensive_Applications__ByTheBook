@@ -412,3 +412,91 @@ def _pb_scalar(t: str, v: Any) -> bytes:
     if t == "sfixed32":
         return struct.pack("<i", v)
     raise ValueError(f"type scalaire inconnu : {t}")
+
+
+def _pb_default(f: PbField) -> Any:
+    if f.repeated:
+        return []
+    if isinstance(f.type, PbMessage):
+        return None
+    return {"string": "", "bytes": b"", "bool": False, "double": 0.0, "float": 0.0}.get(f.type, 0)
+
+
+def pb_encode(record: dict, schema: PbMessage, trace: Optional[list] = None,
+              packed: bool = True) -> bytes:
+    """Encode un dict selon le schéma. Les champs absents (ou à leur valeur par défaut
+    en proto3) ne sont pas écrits. La clé spéciale ``"__unknown__"`` (octets bruts) est
+    recopiée telle quelle à la fin : c'est ainsi qu'un lecteur ancien préserve les champs
+    qu'il ne connaît pas."""
+    out = _Out(trace)
+    for f in schema.fields:
+        if f.name not in record:
+            continue
+        v = record[f.name]
+        if v is None or (not f.repeated and not isinstance(f.type, PbMessage) and v == _pb_default(f)):
+            continue
+        values = list(v) if f.repeated else [v]
+        if f.repeated and not values:
+            continue
+        if f.repeated and packed and _wt(f) != 2:
+            body = b"".join(_pb_scalar(f.type, x) for x in values)
+            out.put(encode_uvarint(f.tag << 3 | 2), "tag", f"#{f.tag} LEN")
+            out.put(encode_uvarint(len(body)), "length", str(len(body)))
+            out.put(body, "int", ", ".join(map(str, values)))
+            continue
+        for x in values:
+            wt = _wt(f)
+            out.put(encode_uvarint(f.tag << 3 | wt), "tag", f"#{f.tag} {_WT_NAME[wt]}")
+            if isinstance(f.type, PbMessage):
+                body = pb_encode(x, f.type)
+                out.put(encode_uvarint(len(body)), "length", str(len(body)))
+                out.put(body, "other", f.type.name)
+            elif f.type == "string":
+                b = str(x).encode("utf-8")
+                out.put(encode_uvarint(len(b)), "length", str(len(b)))
+                out.put(b, "str", str(x))
+            elif f.type == "bytes":
+                out.put(encode_uvarint(len(x)), "length", str(len(x)))
+                out.put(bytes(x), "str", f"{len(x)} octets")
+            else:
+                out.put(_pb_scalar(f.type, x), "int", str(x))
+    unknown = record.get("__unknown__")
+    if unknown:
+        out.put(bytes(unknown), "other", "champs inconnus préservés")
+    return bytes(out.buf)
+
+
+def _pb_read_raw(buf: bytes, pos: int, wt: int) -> Tuple[bytes, int]:
+    """Lit la charge utile d'un champ selon son type d'onde ; renvoie (octets, position)."""
+    start = pos
+    if wt == 0:
+        _, pos = decode_uvarint(buf, pos)
+        return buf[start:pos], pos
+    if wt == 1:
+        return buf[pos:pos + 8], pos + 8
+    if wt == 5:
+        return buf[pos:pos + 4], pos + 4
+    if wt == 2:
+        n, pos = decode_uvarint(buf, pos)
+        return buf[pos:pos + n], pos + n
+    raise ValueError(f"type d'onde non pris en charge : {wt}")
+
+
+def _pb_value(t: str, raw: bytes) -> Any:
+    if t in ("int32", "enum"):
+        return _signed(decode_uvarint(raw)[0], 32)    # troncature à 32 bits
+    if t == "int64":
+        return _signed(decode_uvarint(raw)[0], 64)
+    if t == "uint32":
+        return decode_uvarint(raw)[0] & 0xFFFFFFFF
+    if t == "uint64":
+        return decode_uvarint(raw)[0] & ((1 << 64) - 1)
+    if t == "sint32":
+        return _signed(zigzag_decode(decode_uvarint(raw)[0]), 32)
+    if t == "sint64":
+        return zigzag_decode(decode_uvarint(raw)[0])
+    if t == "bool":
+        return decode_uvarint(raw)[0] != 0
+    fmts = {"double": "<d", "float": "<f", "fixed64": "<Q", "sfixed64": "<q",
+            "fixed32": "<I", "sfixed32": "<i"}
+    return struct.unpack(fmts[t], raw)[0]
