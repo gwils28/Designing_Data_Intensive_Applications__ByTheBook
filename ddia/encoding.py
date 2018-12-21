@@ -500,3 +500,100 @@ def _pb_value(t: str, raw: bytes) -> Any:
     fmts = {"double": "<d", "float": "<f", "fixed64": "<Q", "sfixed64": "<q",
             "fixed32": "<I", "sfixed32": "<i"}
     return struct.unpack(fmts[t], raw)[0]
+
+
+class PbDecodeError(ValueError):
+    """Données illisibles avec le schéma du lecteur (type d'onde incompatible...)."""
+
+
+def pb_decode(buf: bytes, schema: PbMessage, keep_unknown: bool = True, strict: bool = False) -> dict:
+    """Décode selon le schéma **du lecteur**. Les numéros inconnus sont sautés grâce au
+    type d'onde ; si keep_unknown, leurs octets bruts sont rangés sous ``"__unknown__"``.
+    Les champs absents prennent la valeur par défaut de proto3. Un champ connu reçu avec
+    un type d'onde inattendu est traité comme inconnu (comme les bibliothèques
+    officielles), ou lève `PbDecodeError` si strict=True."""
+    tags = schema.by_tag()
+    rec: Dict[str, Any] = {f.name: _pb_default(f) for f in schema.fields}
+    unknown = bytearray()
+    pos = 0
+    while pos < len(buf):
+        start = pos
+        key, pos = decode_uvarint(buf, pos)
+        tag, wt = key >> 3, key & 7
+        raw, pos = _pb_read_raw(buf, pos, wt)
+        f = tags.get(tag)
+        if f is None:
+            unknown += buf[start:pos]
+            continue
+        expected = _wt(f)
+        if f.repeated and wt == 2 and expected != 2:      # scalaires « packed »
+            p, vals = 0, []
+            while p < len(raw):
+                _, p2 = (decode_uvarint(raw, p) if expected == 0 else (None, p + (8 if expected == 1 else 4)))
+                vals.append(_pb_value(f.type, raw[p:p2]))
+                p = p2
+            rec[f.name].extend(vals)
+            continue
+        if wt != expected:
+            if strict:
+                raise PbDecodeError(f"champ {tag} ({f.name}) : type d'onde {wt} reçu, {expected} attendu")
+            unknown += buf[start:pos]
+            continue
+        if isinstance(f.type, PbMessage):
+            v = pb_decode(raw, f.type, keep_unknown)
+        elif f.type == "string":
+            try:
+                v = raw.decode("utf-8")
+            except UnicodeDecodeError as exc:
+                raise PbDecodeError(f"champ {tag} ({f.name}) : UTF-8 invalide") from exc
+        elif f.type == "bytes":
+            v = bytes(raw)
+        else:
+            v = _pb_value(f.type, raw)
+        if f.repeated:
+            rec[f.name].append(v)
+        else:
+            rec[f.name] = v                                # le dernier l'emporte
+    if keep_unknown and unknown:
+        rec["__unknown__"] = bytes(unknown)
+    return rec
+
+
+# =====================================================================================
+# Thrift : BinaryProtocol et CompactProtocol (encodage seul)
+# =====================================================================================
+
+#: schéma Thrift de l'exemple : (numéro, nom, type) ; types : string, i64, i32, bool, list<string>
+PERSON_THRIFT = [(1, "userName", "string"), (2, "favoriteNumber", "i64"), (3, "interests", "list<string>")]
+
+_TB_TYPE = {"bool": 2, "i32": 8, "i64": 10, "string": 11, "list": 15}
+_TC_TYPE = {"bool": 1, "i32": 5, "i64": 6, "string": 8, "list": 9}
+
+
+def thrift_binary_encode(record: dict, schema=PERSON_THRIFT, trace: Optional[list] = None) -> bytes:
+    """BinaryProtocol : type sur 1 octet, numéro de champ sur 2, entiers de taille fixe."""
+    out = _Out(trace)
+    for fid, name, t in schema:
+        if record.get(name) is None:
+            continue
+        v = record[name]
+        base = "list" if t.startswith("list") else t
+        out.put(bytes([_TB_TYPE[base]]) + struct.pack(">h", fid), "tag", f"{fid}:{name}")
+        if t == "string":
+            b = v.encode()
+            out.put(struct.pack(">i", len(b)), "length", str(len(b)))
+            out.put(b, "str", v)
+        elif t == "i64":
+            out.put(struct.pack(">q", v), "int", str(v))
+        elif t == "i32":
+            out.put(struct.pack(">i", v), "int", str(v))
+        elif t == "bool":
+            out.put(b"\x01" if v else b"\x00", "int", str(v))
+        else:  # list<string>
+            out.put(bytes([_TB_TYPE["string"]]) + struct.pack(">i", len(v)), "count", f"list({len(v)})")
+            for s in v:
+                b = s.encode()
+                out.put(struct.pack(">i", len(b)), "length", str(len(b)))
+                out.put(b, "str", s)
+    out.put(b"\x00", "end", "stop")
+    return bytes(out.buf)
