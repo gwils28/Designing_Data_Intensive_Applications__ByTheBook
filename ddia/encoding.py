@@ -668,3 +668,101 @@ def avro_type(s: Any) -> str:
     if isinstance(s, str):
         return s
     return s["type"] if isinstance(s["type"], str) else avro_type(s["type"])
+
+
+def _norm(s: Any) -> Any:
+    """{"type": "long"} -> "long" (forme courte des primitives)."""
+    if isinstance(s, dict) and s.get("type") in PRIMITIVES and len(s) == 1:
+        return s["type"]
+    return s
+
+
+def avro_encode(datum: Any, schema: Any, trace: Optional[list] = None) -> bytes:
+    """Encode `datum` selon `schema` : valeurs concaténées, sans nom ni numéro de champ."""
+    out = _Out(trace)
+    _av_write(out, datum, _norm(schema), "")
+    return bytes(out.buf)
+
+
+def _branch_of(datum: Any, union: list) -> int:
+    for i, b in enumerate(union):
+        if _matches(datum, _norm(b)):
+            return i
+    raise AvroError(f"aucune branche de l'union {union} ne convient à {datum!r}")
+
+
+def _matches(datum: Any, s: Any) -> bool:
+    t = avro_type(s)
+    if t == "null":
+        return datum is None
+    if t == "boolean":
+        return isinstance(datum, bool)
+    if t in ("int", "long"):
+        return isinstance(datum, int) and not isinstance(datum, bool)
+    if t in ("float", "double"):
+        return isinstance(datum, (int, float)) and not isinstance(datum, bool)
+    if t == "string":
+        return isinstance(datum, str)
+    if t in ("bytes", "fixed"):
+        return isinstance(datum, (bytes, bytearray))
+    if t == "array":
+        return isinstance(datum, list)
+    if t in ("map", "record"):
+        return isinstance(datum, dict)
+    if t == "enum":
+        return isinstance(datum, str) and datum in s["symbols"]
+    return False
+
+
+def _av_write(out: _Out, d: Any, s: Any, path: str) -> None:
+    s = _norm(s)
+    t = avro_type(s)
+    if t == "union":
+        i = _branch_of(d, s)
+        out.put(encode_svarint(i), "union", f"union {i}")
+        _av_write(out, d, s[i], path)
+    elif t == "null":
+        pass
+    elif t == "boolean":
+        out.put(b"\x01" if d else b"\x00", "int", str(d))
+    elif t in ("int", "long"):
+        out.put(encode_svarint(int(d)), "int", str(d))
+    elif t == "float":
+        out.put(struct.pack("<f", d), "int", repr(d))
+    elif t == "double":
+        out.put(struct.pack("<d", d), "int", repr(d))
+    elif t in ("string", "bytes"):
+        b = d.encode("utf-8") if t == "string" else bytes(d)
+        out.put(encode_svarint(len(b)), "length", str(len(b)))
+        out.put(b, "str", d if t == "string" else f"{len(b)} octets")
+    elif t == "fixed":
+        out.put(bytes(d), "str", f"{len(d)} octets")
+    elif t == "enum":
+        out.put(encode_svarint(s["symbols"].index(d)), "int", d)
+    elif t == "array":
+        if d:
+            out.put(encode_svarint(len(d)), "count", f"{len(d)} élém.")
+            for x in d:
+                _av_write(out, x, s["items"], path)
+        out.put(b"\x00", "end", "fin")
+    elif t == "map":
+        if d:
+            out.put(encode_svarint(len(d)), "count", f"{len(d)} élém.")
+            for k, v in d.items():
+                b = k.encode()
+                out.put(encode_svarint(len(b)), "length", str(len(b)))
+                out.put(b, "name", k)
+                _av_write(out, v, s["values"], path)
+        out.put(b"\x00", "end", "fin")
+    elif t == "record":
+        for f in s["fields"]:
+            name = f["name"]
+            if name in d:
+                v = d[name]
+            elif "default" in f:
+                v = f["default"]
+            else:
+                raise AvroError(f"champ obligatoire absent : {path}{name}")
+            _av_write(out, v, f["type"], path + name + ".")
+    else:
+        raise AvroError(f"type inconnu : {t}")
