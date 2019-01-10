@@ -766,3 +766,144 @@ def _av_write(out: _Out, d: Any, s: Any, path: str) -> None:
             _av_write(out, v, f["type"], path + name + ".")
     else:
         raise AvroError(f"type inconnu : {t}")
+
+
+class _In:
+    def __init__(self, buf: bytes, pos: int = 0):
+        self.buf, self.pos = buf, pos
+
+    def long(self) -> int:
+        v, self.pos = decode_svarint(self.buf, self.pos)
+        return v
+
+    def take(self, n: int) -> bytes:
+        if self.pos + n > len(self.buf):
+            raise AvroError("données tronquées")
+        b = self.buf[self.pos:self.pos + n]
+        self.pos += n
+        return b
+
+
+def _names(s: Any) -> set:
+    """Nom et alias d'un type nommé (record, enum, fixed)."""
+    if isinstance(s, dict) and "name" in s:
+        return {s["name"], *s.get("aliases", [])}
+    return set()
+
+
+def _same_kind(w: Any, r: Any) -> bool:
+    """Le type de l'écrivain w peut-il être lu comme r (hors unions) ?"""
+    tw, tr = avro_type(w), avro_type(r)
+    if tw in ("record", "enum", "fixed"):
+        return tw == tr and bool(_names(w) & _names(r))
+    if tw == tr:
+        return True
+    return tr in PROMOTIONS.get(tw, set())
+
+
+def _read_plain(i: _In, s: Any) -> Any:
+    return _av_read(i, s, s)
+
+
+def _convert_default(v: Any, s: Any) -> Any:
+    """Valeur par défaut JSON -> valeur du lecteur (pour une union : première branche)."""
+    s = _norm(s)
+    t = avro_type(s)
+    if t == "union":
+        return _convert_default(v, s[0])
+    if t == "bytes" and isinstance(v, str):
+        return v.encode("latin-1")
+    if t == "record":
+        return {f["name"]: _convert_default(v.get(f["name"], f.get("default")), f["type"]) for f in s["fields"]}
+    return v
+
+
+def _av_read(i: _In, w: Any, r: Any) -> Any:
+    w, r = _norm(w), _norm(r)
+    tw, tr = avro_type(w), avro_type(r)
+    if tw == "union":
+        k = i.long()
+        if not 0 <= k < len(w):
+            raise AvroError(f"indice de branche {k} hors de l'union de l'écrivain")
+        return _av_read(i, w[k], r)
+    if tr == "union":
+        for b in r:
+            if avro_type(_norm(b)) != "union" and _same_kind(w, _norm(b)):
+                return _av_read(i, w, b)
+        raise AvroError(f"le type {tw} de l'écrivain ne correspond à aucune branche de l'union du lecteur")
+    if not _same_kind(w, r):
+        raise AvroError(f"type de l'écrivain {tw} illisible comme {tr}")
+    if tw == "null":
+        return None
+    if tw == "boolean":
+        return i.take(1) != b"\x00"
+    if tw in ("int", "long"):
+        v = i.long()
+        return float(v) if tr in ("float", "double") else v
+    if tw == "float":
+        return struct.unpack("<f", i.take(4))[0]
+    if tw == "double":
+        return struct.unpack("<d", i.take(8))[0]
+    if tw in ("string", "bytes"):
+        b = bytes(i.take(i.long()))
+        if tr == "string":
+            try:
+                return b.decode("utf-8")
+            except UnicodeDecodeError as exc:
+                raise AvroError("UTF-8 invalide") from exc
+        return b
+    if tw == "fixed":
+        if w["size"] != r["size"]:
+            raise AvroError("tailles de fixed différentes")
+        return bytes(i.take(w["size"]))
+    if tw == "enum":
+        sym = w["symbols"][i.long()]
+        if sym in r["symbols"]:
+            return sym
+        if "default" in r:
+            return r["default"]
+        raise AvroError(f"symbole {sym!r} inconnu du lecteur et pas de défaut")
+    if tw == "array":
+        out = []
+        while True:
+            n = i.long()
+            if n == 0:
+                return out
+            if n < 0:
+                n = -n
+                i.long()  # taille du bloc en octets
+            for _ in range(n):
+                out.append(_av_read(i, w["items"], r["items"]))
+    if tw == "map":
+        out = {}
+        while True:
+            n = i.long()
+            if n == 0:
+                return out
+            if n < 0:
+                n = -n
+                i.long()
+            for _ in range(n):
+                k = bytes(i.take(i.long())).decode()
+                out[k] = _av_read(i, w["values"], r["values"])
+    if tw == "record":
+        rfields = {}
+        for f in r["fields"]:
+            for nm in [f["name"], *f.get("aliases", [])]:
+                rfields[nm] = f
+        out = {}
+        seen = set()
+        for wf in w["fields"]:
+            rf = rfields.get(wf["name"])
+            if rf is None:
+                _read_plain(i, wf["type"])          # champ inconnu du lecteur : ignoré
+            else:
+                out[rf["name"]] = _av_read(i, wf["type"], rf["type"])
+                seen.add(rf["name"])
+        for f in r["fields"]:
+            if f["name"] not in seen:
+                if "default" not in f:
+                    raise AvroError(f"champ {f['name']!r} attendu par le lecteur, absent chez l'écrivain et sans défaut")
+                out[f["name"]] = _convert_default(f["default"], f["type"])
+        return {f["name"]: out[f["name"]] for f in r["fields"]}
+    raise AvroError(f"type inconnu : {tw}")
