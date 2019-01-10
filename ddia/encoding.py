@@ -597,3 +597,74 @@ def thrift_binary_encode(record: dict, schema=PERSON_THRIFT, trace: Optional[lis
                 out.put(b, "str", s)
     out.put(b"\x00", "end", "stop")
     return bytes(out.buf)
+
+
+def thrift_compact_encode(record: dict, schema=PERSON_THRIFT, trace: Optional[list] = None) -> bytes:
+    """CompactProtocol : écart de numéro et type dans un octet, varints zigzag."""
+    out = _Out(trace)
+    last = 0
+    for fid, name, t in schema:
+        if record.get(name) is None:
+            continue
+        v = record[name]
+        base = "list" if t.startswith("list") else t
+        ctype = _TC_TYPE[base]
+        if t == "bool":
+            ctype = 1 if v else 2
+        delta = fid - last
+        if 0 < delta <= 15:
+            out.put(bytes([delta << 4 | ctype]), "tag", f"#{fid} {({'string': 'str'}).get(base, base)}")
+        else:
+            out.put(bytes([ctype]) + encode_svarint(fid), "tag", f"{fid}:{name}")
+        last = fid
+        if t == "string":
+            b = v.encode()
+            out.put(encode_uvarint(len(b)), "length", str(len(b)))
+            out.put(b, "str", v)
+        elif t in ("i64", "i32"):
+            out.put(encode_svarint(v), "int", str(v))
+        elif t == "bool":
+            pass
+        else:
+            n = len(v)
+            hdr = bytes([n << 4 | _TC_TYPE["string"]]) if n < 15 else bytes([0xF0 | _TC_TYPE["string"]]) + encode_uvarint(n)
+            out.put(hdr, "count", f"list({n})")
+            for s in v:
+                b = s.encode()
+                out.put(encode_uvarint(len(b)), "length", str(len(b)))
+                out.put(b, "str", s)
+    out.put(b"\x00", "end", "stop")
+    return bytes(out.buf)
+
+
+# =====================================================================================
+# Avro
+# =====================================================================================
+
+#: le schéma Person du chapitre, dans sa représentation JSON
+PERSON_AVRO = {
+    "type": "record", "name": "Person",
+    "fields": [
+        {"name": "userName", "type": "string"},
+        {"name": "favoriteNumber", "type": ["null", "long"], "default": None},
+        {"name": "interests", "type": {"type": "array", "items": "string"}},
+    ],
+}
+
+PRIMITIVES = ("null", "boolean", "int", "long", "float", "double", "bytes", "string")
+#: promotions autorisées par la spécification (type de l'écrivain -> types du lecteur)
+PROMOTIONS = {"int": {"long", "float", "double"}, "long": {"float", "double"},
+              "float": {"double"}, "string": {"bytes"}, "bytes": {"string"}}
+
+
+class AvroError(ValueError):
+    """Résolution impossible entre le schéma de l'écrivain et celui du lecteur."""
+
+
+def avro_type(s: Any) -> str:
+    """Nom du type d'un schéma : primitive, record, array, map, enum, fixed ou union."""
+    if isinstance(s, list):
+        return "union"
+    if isinstance(s, str):
+        return s
+    return s["type"] if isinstance(s["type"], str) else avro_type(s["type"])
