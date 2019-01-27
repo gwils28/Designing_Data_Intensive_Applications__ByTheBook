@@ -907,3 +907,82 @@ def _av_read(i: _In, w: Any, r: Any) -> Any:
                 out[f["name"]] = _convert_default(f["default"], f["type"])
         return {f["name"]: out[f["name"]] for f in r["fields"]}
     raise AvroError(f"type inconnu : {tw}")
+
+
+def avro_decode(buf: bytes, writer: Any, reader: Any = None) -> Any:
+    """Décode avec le schéma de l'écrivain, puis traduit vers le schéma du lecteur."""
+    i = _In(buf)
+    v = _av_read(i, writer, writer if reader is None else reader)
+    if i.pos != len(buf):
+        raise AvroError(f"{len(buf) - i.pos} octets non consommés : schéma de l'écrivain erroné ?")
+    return v
+
+
+def avro_compatible(writer: Any, reader: Any) -> Tuple[bool, str]:
+    """Vérification statique : un lecteur au schéma `reader` peut-il lire **toutes** les
+    données écrites avec `writer` ? Renvoie (booléen, raison)."""
+    try:
+        _check(_norm(writer), _norm(reader), "")
+        return True, "compatible"
+    except AvroError as exc:
+        return False, str(exc)
+
+
+def _check(w: Any, r: Any, path: str) -> None:
+    w, r = _norm(w), _norm(r)
+    tw, tr = avro_type(w), avro_type(r)
+    if tw == "union":
+        for b in w:
+            _check(b, r, path)
+        return
+    if tr == "union":
+        for b in r:
+            if avro_type(_norm(b)) != "union" and _same_kind(w, _norm(b)):
+                _check(w, b, path)
+                return
+        raise AvroError(f"{path.rstrip('.') or 'racine'} : {tw} absent de l'union du lecteur")
+    if not _same_kind(w, r):
+        raise AvroError(f"{path.rstrip('.') or 'racine'} : {tw} illisible comme {tr}")
+    if tw == "array":
+        _check(w["items"], r["items"], path + "[]")
+    elif tw == "map":
+        _check(w["values"], r["values"], path + "{}")
+    elif tw == "enum":
+        missing = set(w["symbols"]) - set(r["symbols"])
+        if missing and "default" not in r:
+            raise AvroError(f"{path.rstrip('.') or 'racine'} : symboles {sorted(missing)} inconnus du lecteur")
+    elif tw == "record":
+        wnames = {f["name"]: f for f in w["fields"]}
+        for rf in r["fields"]:
+            match = None
+            for nm in [rf["name"], *rf.get("aliases", [])]:
+                if nm in wnames:
+                    match = wnames[nm]
+                    break
+            if match is None:
+                if "default" not in rf:
+                    raise AvroError(f"champ {path}{rf['name']} : absent chez l'écrivain et sans défaut chez le lecteur")
+            else:
+                _check(match["type"], rf["type"], path + rf["name"] + ".")
+
+
+# --- fichier conteneur (object container file), version simplifiée sans compression ---
+
+AVRO_MAGIC = b"Obj\x01"
+_META_SCHEMA = {"type": "map", "values": "bytes"}
+
+
+def avro_container_write(records: Sequence[dict], schema: Any, block_size: int = 1000,
+                         sync: Optional[bytes] = None) -> bytes:
+    """Fichier conteneur Avro : en-tête (schéma JSON une seule fois) puis blocs
+    (nombre d'objets, taille, données, marqueur de synchronisation)."""
+    sync = sync or bytes(range(16))
+    out = bytearray(AVRO_MAGIC)
+    meta = {"avro.schema": json.dumps(schema).encode(), "avro.codec": b"null"}
+    out += avro_encode(meta, _META_SCHEMA)
+    out += sync
+    for k in range(0, len(records), block_size):
+        block = records[k:k + block_size]
+        data = b"".join(avro_encode(r, schema) for r in block)
+        out += encode_svarint(len(block)) + encode_svarint(len(data)) + data + sync
+    return bytes(out)
