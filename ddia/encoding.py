@@ -1196,3 +1196,101 @@ def draw_byte_map(buf: bytes, trace: Sequence[Segment], title: str = "", per_row
     if subtitle_text:
         ax.text(0, 1.0, subtitle_text, transform=ax.transAxes, fontsize=8.5, color="#94A3B8", va="bottom")
     return fig
+
+
+def byte_legend(ax, roles: Sequence[str], loc: str = "lower right", ncol: int = 4, **kw) -> None:
+    """Légende des rôles d'octets."""
+    from matplotlib.patches import Patch
+
+    from .plotting import LIGHT
+    colors = role_colors()
+    handles = [Patch(facecolor=LIGHT.get(colors[r], "#F1F5F9"), edgecolor=colors[r], label=ROLES[r]) for r in roles]
+    ax.legend(handles=handles, loc=loc, ncol=ncol, fontsize=8, frameon=False, **kw)
+
+
+# =====================================================================================
+# Simulations : déploiement progressif et relances
+# =====================================================================================
+
+def simulate_rolling_upgrade(n_nodes: int = 10, n_records: int = 2000, duration: int = 200,
+                             upgrade_start: int = 20, upgrade_every: int = 10,
+                             updates_per_step: int = 60, preserve_unknown: bool = False,
+                             seed: int = 0):
+    """Déploiement progressif d'une version v2 qui ajoute un champ `photo` à des
+    enregistrements partagés en base.
+
+    À chaque pas de temps, `updates_per_step` mises à jour lecture-modification-écriture
+    sont faites par des nœuds tirés au hasard. Un nœud v2 permet à l'utilisateur d'ajouter
+    sa photo (une seule fois par enregistrement : une photo effacée ne revient pas) ; un
+    nœud v1 qui réécrit l'enregistrement **perd** `photo` sauf si preserve_unknown.
+    Renvoie un DataFrame par pas : part de nœuds v2, enregistrements avec photo, photos
+    perdues (cumul), enregistrements ayant reçu une photo un jour.
+    """
+    import pandas as pd
+    rng = random.Random(seed)
+    upgraded_at = [upgrade_start + k * upgrade_every for k in range(n_nodes)]
+    has_photo = [False] * n_records
+    ever = [False] * n_records
+    lost = 0
+    rows = []
+    for t in range(duration):
+        v2 = [t >= u for u in upgraded_at]
+        for _ in range(updates_per_step):
+            node = rng.randrange(n_nodes)
+            rec = rng.randrange(n_records)
+            if v2[node]:
+                if not ever[rec]:              # l'utilisateur ajoute sa photo une seule fois
+                    has_photo[rec] = True
+                    ever[rec] = True
+            else:
+                if has_photo[rec] and not preserve_unknown:
+                    has_photo[rec] = False
+                    lost += 1
+        rows.append({"t": t, "part_v2": sum(v2) / n_nodes, "avec_photo": sum(has_photo) / n_records,
+                     "photos_perdues": lost, "jamais_perdu": sum(ever) / n_records})
+    return pd.DataFrame(rows)
+
+
+def simulate_retries(n: int = 10000, p_req_loss: float = 0.02, p_resp_loss: float = 0.02,
+                     p_slow: float = 0.0, max_attempts: int = 3, idempotent: bool = False,
+                     seed: int = 0) -> Dict[str, float]:
+    """Appels distants avec délai d'expiration et relances.
+
+    Une tentative échoue (vue du client) si la requête se perd, si la réponse se perd, ou
+    si le serveur est trop lent (p_slow). Dans les deux derniers cas, l'action a **quand
+    même** été exécutée. Avec idempotent=True, le serveur déduplique par clé
+    d'idempotence. Renvoie des proportions : succès, échec final, exécutions multiples,
+    échec final alors que l'action a eu lieu (issue inconnue du client).
+    """
+    rng = random.Random(seed)
+    stats = {"succès": 0, "échec final": 0, "exécutée 2 fois ou plus": 0,
+             "échec mais exécutée": 0, "tentatives moyennes": 0}
+    for _ in range(n):
+        executed = 0
+        ok = False
+        attempts = 0
+        for _a in range(max_attempts):
+            attempts += 1
+            if rng.random() < p_req_loss:
+                continue
+            if not (idempotent and executed):
+                executed += 1
+            if rng.random() < p_resp_loss or rng.random() < p_slow:
+                continue
+            ok = True
+            break
+        stats["tentatives moyennes"] += attempts
+        if ok:
+            stats["succès"] += 1
+        else:
+            stats["échec final"] += 1
+            if executed:
+                stats["échec mais exécutée"] += 1
+        if executed >= 2:
+            stats["exécutée 2 fois ou plus"] += 1
+    return {k: v / n for k, v in stats.items()}
+
+
+# =====================================================================================
+# JSON Schema (sous-ensemble minimal)
+# =====================================================================================
