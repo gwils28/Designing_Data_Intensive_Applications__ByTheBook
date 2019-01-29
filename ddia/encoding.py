@@ -986,3 +986,127 @@ def avro_container_write(records: Sequence[dict], schema: Any, block_size: int =
         data = b"".join(avro_encode(r, schema) for r in block)
         out += encode_svarint(len(block)) + encode_svarint(len(data)) + data + sync
     return bytes(out)
+
+
+def avro_container_read(buf: bytes, reader: Any = None) -> Tuple[Any, List[Any]]:
+    """Relit un fichier conteneur : renvoie (schéma de l'écrivain, enregistrements)."""
+    if buf[:4] != AVRO_MAGIC:
+        raise AvroError("ce n'est pas un fichier conteneur Avro")
+    i = _In(buf, 4)
+    meta = _read_plain(i, _META_SCHEMA)
+    writer = json.loads(meta["avro.schema"].decode())
+    sync = i.take(16)
+    recs: List[Any] = []
+    r = writer if reader is None else reader
+    while i.pos < len(buf):
+        n = i.long()
+        i.long()
+        for _ in range(n):
+            recs.append(_av_read(i, writer, r))
+        if i.take(16) != sync:
+            raise AvroError("marqueur de synchronisation invalide")
+    return writer, recs
+
+
+# --- schéma généré dynamiquement depuis une table relationnelle ---
+
+_SQL_TO_AVRO = {"INTEGER": "long", "INT": "long", "REAL": "double", "FLOAT": "double",
+                "TEXT": "string", "VARCHAR": "string", "BLOB": "bytes", "BOOLEAN": "boolean"}
+
+
+def avro_schema_from_sqlite(con, table: str) -> dict:
+    """Génère un schéma Avro (un champ par colonne, nullable avec défaut null)."""
+    cols = con.execute(f"PRAGMA table_info({table})").fetchall()
+    fields = []
+    for _, name, decl, notnull, _default, _pk in cols:
+        base = _SQL_TO_AVRO.get((decl or "TEXT").split("(")[0].upper(), "string")
+        if notnull:
+            fields.append({"name": name, "type": base})
+        else:
+            fields.append({"name": name, "type": ["null", base], "default": None})
+    return {"type": "record", "name": table, "fields": fields}
+
+
+# =====================================================================================
+# Registre de schémas
+# =====================================================================================
+
+class IncompatibleSchema(ValueError):
+    pass
+
+
+class SchemaRegistry:
+    """Registre de schémas Avro à la manière du registre de Confluent.
+
+    Chaque enregistrement encodé est préfixé par un octet magique 0 et l'identifiant du
+    schéma de l'écrivain sur 4 octets (gros-boutiste). Modes de compatibilité :
+    BACKWARD (le nouveau schéma sait lire les données de l'ancien), FORWARD (l'ancien sait
+    lire les données du nouveau), FULL (les deux), suffixe _TRANSITIVE (vérifié contre
+    toutes les versions précédentes et pas seulement la dernière), NONE.
+    """
+
+    MODES = ("NONE", "BACKWARD", "FORWARD", "FULL",
+             "BACKWARD_TRANSITIVE", "FORWARD_TRANSITIVE", "FULL_TRANSITIVE")
+
+    def __init__(self, compatibility: str = "BACKWARD"):
+        if compatibility not in self.MODES:
+            raise ValueError(compatibility)
+        self.compatibility = compatibility
+        self.schemas: Dict[int, Any] = {}
+        self.subjects: Dict[str, List[int]] = {}
+        self._by_text: Dict[str, int] = {}
+
+    def check(self, subject: str, schema: Any) -> List[str]:
+        """Liste des violations si l'on enregistrait `schema` (vide = acceptable)."""
+        mode = self.compatibility
+        versions = self.subjects.get(subject, [])
+        if mode == "NONE" or not versions:
+            return []
+        against = versions if mode.endswith("_TRANSITIVE") else versions[-1:]
+        problems = []
+        for vid in against:
+            old = self.schemas[vid]
+            k = versions.index(vid) + 1
+            if mode.startswith(("BACKWARD", "FULL")):
+                ok, why = avro_compatible(old, schema)
+                if not ok:
+                    problems.append(f"v{k} -> nouveau (BACKWARD) : {why}")
+            if mode.startswith(("FORWARD", "FULL")):
+                ok, why = avro_compatible(schema, old)
+                if not ok:
+                    problems.append(f"nouveau -> v{k} (FORWARD) : {why}")
+        return problems
+
+    def register(self, subject: str, schema: Any) -> int:
+        text = json.dumps(schema, sort_keys=True)
+        if text in self._by_text and self._by_text[text] in self.subjects.get(subject, []):
+            return self._by_text[text]
+        problems = self.check(subject, schema)
+        if problems:
+            raise IncompatibleSchema("; ".join(problems))
+        sid = self._by_text.get(text) or len(self.schemas) + 1
+        self.schemas[sid] = schema
+        self._by_text[text] = sid
+        self.subjects.setdefault(subject, []).append(sid)
+        return sid
+
+    def encode(self, schema_id: int, datum: Any) -> bytes:
+        return b"\x00" + struct.pack(">I", schema_id) + avro_encode(datum, self.schemas[schema_id])
+
+    def decode(self, buf: bytes, reader: Any = None) -> Any:
+        if buf[0] != 0:
+            raise ValueError("octet magique invalide")
+        sid = struct.unpack(">I", buf[1:5])[0]
+        return avro_decode(buf[5:], self.schemas[sid], reader)
+
+
+# =====================================================================================
+# Données synthétiques
+# =====================================================================================
+
+_FIRST = ["Martin", "Alice", "Bob", "Chloé", "David", "Emma", "Farid", "Gaëlle", "Hugo", "Inès",
+          "Jules", "Karima", "Léo", "Manon", "Nathan", "Océane", "Paul", "Quentin", "Rose", "Sami",
+          "Théo", "Ursule", "Victor", "Wassim", "Yasmine", "Zoé"]
+_INTERESTS = ["daydreaming", "hacking", "jardinage", "escalade", "cuisine", "photographie",
+              "lecture", "randonnée", "musique", "échecs", "vélo", "cinéma", "astronomie", "danse",
+              "poterie", "natation", "théâtre", "jeux vidéo", "voyage", "bricolage"]
