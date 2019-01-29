@@ -1110,3 +1110,89 @@ _FIRST = ["Martin", "Alice", "Bob", "Chloé", "David", "Emma", "Farid", "Gaëlle
 _INTERESTS = ["daydreaming", "hacking", "jardinage", "escalade", "cuisine", "photographie",
               "lecture", "randonnée", "musique", "échecs", "vélo", "cinéma", "astronomie", "danse",
               "poterie", "natation", "théâtre", "jeux vidéo", "voyage", "bricolage"]
+
+
+def make_people(n: int, seed: int = 0, p_missing_number: float = 0.2) -> List[dict]:
+    """n enregistrements au format de l'exemple (userName, favoriteNumber, interests)."""
+    rng = random.Random(seed)
+    out = []
+    for k in range(n):
+        name = rng.choice(_FIRST) + (str(rng.randrange(1000)) if rng.random() < 0.7 else "")
+        num = None if rng.random() < p_missing_number else int(rng.lognormvariate(4, 2.2)) * rng.choice([1, 1, 1, -1])
+        interests = rng.sample(_INTERESTS, rng.randint(0, 4))
+        out.append({"userName": name, "favoriteNumber": num, "interests": interests})
+    return out
+
+
+# =====================================================================================
+# Carte d'octets
+# =====================================================================================
+
+def role_colors() -> Dict[str, str]:
+    from .plotting import AMBER, GRAY, INDIGO, ROSE, SKY, SLATE, TEAL, VIOLET
+    return {"header": SLATE, "name": ROSE, "tag": INDIGO, "length": AMBER, "str": TEAL,
+            "int": VIOLET, "count": SKY, "end": GRAY, "union": SKY, "other": GRAY}
+
+
+def draw_byte_map(buf: bytes, trace: Sequence[Segment], title: str = "", per_row: int = 24,
+                  ax=None, show_ascii: bool = True, cell: float = 0.5, subtitle_text: str = ""):
+    """Dessine les octets sur une grille, colorés par rôle, avec l'étiquette des segments.
+
+    Chaque case montre l'octet en hexadécimal (et le caractère ASCII s'il est imprimable) ;
+    sous chaque segment, son étiquette. Renvoie la figure.
+    """
+    import matplotlib.pyplot as plt
+    from matplotlib.patches import Rectangle
+
+    from .plotting import LIGHT, SLATE
+    colors = role_colors()
+    n = len(buf)
+    rows = (n + per_row - 1) // per_row
+    row_h = 1.55
+    if ax is None:
+        fig, ax = plt.subplots(figsize=(per_row * cell + 0.6, rows * row_h * cell + 1.1))
+    else:
+        fig = ax.figure
+    role_of = ["other"] * n
+    for s in trace:
+        for k in range(s.start, s.end):
+            role_of[k] = s.role
+    for k, b in enumerate(buf):
+        r, c = divmod(k, per_row)
+        y = -r * row_h
+        col = colors[role_of[k]]
+        ax.add_patch(Rectangle((c, y), 0.94, 0.94, facecolor=LIGHT.get(col, "#F1F5F9"), edgecolor=col, lw=1.1))
+        ax.text(c + 0.47, y + 0.62, f"{b:02x}", ha="center", va="center", fontsize=7.6,
+                family="DejaVu Sans Mono", color=SLATE)
+        if show_ascii:
+            ch = chr(b) if 33 <= b < 127 else "·"
+            ax.text(c + 0.47, y + 0.25, ch, ha="center", va="center", fontsize=6.8, color=col,
+                    family="DejaVu Sans Mono")
+    for s in trace:
+        # découpe le segment selon les lignes
+        k = s.start
+        first = True
+        while k < s.end:
+            r, c = divmod(k, per_row)
+            stop = min(s.end, (r + 1) * per_row)
+            width = stop - k
+            y = -r * row_h
+            col = colors[s.role]
+            ax.plot([c + 0.05, c + width - 0.09], [y - 0.08, y - 0.08], color=col, lw=1.6, solid_capstyle="butt")
+            label = s.label if first else "…"
+            maxc = max(1, int(width * 7))
+            if len(label) > maxc:
+                label = label[:max(1, maxc - 1)] + "…"
+            if width >= 1 and label:
+                ax.text(c + width / 2 - 0.02, y - 0.3, label, ha="center", va="center", fontsize=6.6, color=col)
+            first = False
+            k = stop
+    ax.set_xlim(-0.2, per_row + 0.2)
+    ax.set_ylim(-(rows - 1) * row_h - 0.6, 1.1)
+    ax.set_aspect("equal")
+    ax.axis("off")
+    if title:
+        ax.set_title(title, loc="left", fontsize=11.5, fontweight="bold", pad=14 if subtitle_text else 6)
+    if subtitle_text:
+        ax.text(0, 1.0, subtitle_text, transform=ax.transAxes, fontsize=8.5, color="#94A3B8", va="bottom")
+    return fig
