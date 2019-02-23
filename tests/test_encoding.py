@@ -108,3 +108,121 @@ V2 = {"type": "record", "name": "Person", "fields": [
     {"name": "interests", "type": {"type": "array", "items": "string"}},
     {"name": "photoURL", "type": ["null", "string"], "default": None},
 ]}
+
+
+def test_avro_aller_retour():
+    for rec in E.make_people(300, seed=3):
+        assert E.avro_decode(E.avro_encode(rec, E.PERSON_AVRO), E.PERSON_AVRO) == rec
+
+
+def test_avro_resolution_ordre_defaut_et_champ_ignore():
+    data = E.avro_encode(R, E.PERSON_AVRO)
+    got = E.avro_decode(data, E.PERSON_AVRO, V2)
+    assert got == {"userName": "Martin", "interests": ["daydreaming", "hacking"], "photoURL": None}
+    back = E.avro_decode(E.avro_encode({**got, "photoURL": "p.jpg"}, V2), V2, E.PERSON_AVRO)
+    assert back["favoriteNumber"] is None
+
+
+def test_avro_champ_sans_defaut_casse_la_compatibilite():
+    bad = copy.deepcopy(V2)
+    bad["fields"][2] = {"name": "photoURL", "type": "string"}
+    with pytest.raises(E.AvroError):
+        E.avro_decode(E.avro_encode(R, E.PERSON_AVRO), E.PERSON_AVRO, bad)
+    assert not E.avro_compatible(E.PERSON_AVRO, bad)[0]
+    assert E.avro_compatible(bad, E.PERSON_AVRO)[0]     # l'ancien lecteur ignore photoURL
+    assert E.avro_compatible(E.PERSON_AVRO, V2)[0] and E.avro_compatible(V2, E.PERSON_AVRO)[0]
+
+
+def test_avro_alias_et_promotion():
+    w = {"type": "record", "name": "P", "fields": [{"name": "n", "type": "int"}]}
+    r = {"type": "record", "name": "P", "fields": [{"name": "num", "aliases": ["n"], "type": "double"}]}
+    assert E.avro_decode(E.avro_encode({"n": 7}, w), w, r) == {"num": 7.0}
+    assert E.avro_compatible(w, r)[0] and not E.avro_compatible(r, w)[0]
+
+
+def test_avro_union_elargie():
+    w = {"type": "record", "name": "P", "fields": [{"name": "x", "type": ["null", "long", "string"]}]}
+    r = {"type": "record", "name": "P", "fields": [{"name": "x", "type": ["null", "long"]}]}
+    assert E.avro_compatible(r, w)[0] and not E.avro_compatible(w, r)[0]
+    assert E.avro_decode(E.avro_encode({"x": 5}, w), w, r) == {"x": 5}
+    with pytest.raises(E.AvroError):
+        E.avro_decode(E.avro_encode({"x": "a"}, w), w, r)
+
+
+def test_avro_mauvais_schema_ecrivain_detecte_ou_corrompu():
+    data = E.avro_encode(R, E.PERSON_AVRO)
+    with pytest.raises(E.AvroError):
+        E.avro_decode(data, V2)
+
+
+def test_avro_conteneur():
+    recs = E.make_people(250, seed=1)
+    buf = E.avro_container_write(recs, E.PERSON_AVRO, block_size=100)
+    w, got = E.avro_container_read(buf)
+    assert w == E.PERSON_AVRO and got == recs
+    _, got2 = E.avro_container_read(buf, V2)
+    assert all(g["photoURL"] is None for g in got2)
+
+
+def test_avro_schema_depuis_sqlite():
+    con = sqlite3.connect(":memory:")
+    con.execute("CREATE TABLE clients (id INTEGER NOT NULL, nom TEXT, solde REAL)")
+    s = E.avro_schema_from_sqlite(con, "clients")
+    assert [f["name"] for f in s["fields"]] == ["id", "nom", "solde"]
+    assert s["fields"][0]["type"] == "long" and s["fields"][1]["type"] == ["null", "string"]
+    rec = {"id": 1, "nom": None, "solde": 3.5}
+    assert E.avro_decode(E.avro_encode(rec, s), s) == rec
+
+
+def test_registre_de_schemas():
+    reg = E.SchemaRegistry("BACKWARD")
+    i1 = reg.register("person", E.PERSON_AVRO)
+    i2 = reg.register("person", V2)
+    assert reg.register("person", V2) == i2
+    msg = reg.encode(i1, R)
+    assert msg[0] == 0 and len(msg) == 5 + 32
+    assert reg.decode(msg, V2)["photoURL"] is None
+    bad = copy.deepcopy(V2)
+    bad["fields"].append({"name": "age", "type": "int"})
+    with pytest.raises(E.IncompatibleSchema):
+        reg.register("person", bad)
+    fwd = E.SchemaRegistry("FORWARD")
+    fwd.register("p", E.PERSON_AVRO)
+    fwd.register("p", bad)                               # l'ancien lecteur ignore les ajouts
+
+
+def test_registre_transitif():
+    a = {"type": "record", "name": "P", "fields": [{"name": "x", "type": "int"}]}
+    b = {"type": "record", "name": "P", "fields": [{"name": "x", "type": "int", "default": 0}]}
+    c = {"type": "record", "name": "P", "fields": [{"name": "y", "type": "int", "default": 0}]}
+    reg = E.SchemaRegistry("FORWARD")
+    for s in (a, b, c):
+        reg.register("p", s)
+    reg2 = E.SchemaRegistry("FORWARD_TRANSITIVE")
+    reg2.register("p", a)
+    reg2.register("p", b)
+    with pytest.raises(E.IncompatibleSchema):
+        reg2.register("p", c)
+
+
+# ---------------------------------------------------------------- simulations
+def test_simulation_deploiement_progressif():
+    lossy = E.simulate_rolling_upgrade(seed=1)
+    safe = E.simulate_rolling_upgrade(seed=1, preserve_unknown=True)
+    assert lossy["photos_perdues"].iloc[-1] > 0
+    assert safe["photos_perdues"].iloc[-1] == 0
+    assert lossy["part_v2"].iloc[-1] == 1.0
+
+
+def test_simulation_relances():
+    a = E.simulate_retries(20000, 0.05, 0.05, max_attempts=3, seed=2)
+    b = E.simulate_retries(20000, 0.05, 0.05, max_attempts=3, idempotent=True, seed=2)
+    assert a["exécutée 2 fois ou plus"] > 0.03 and b["exécutée 2 fois ou plus"] == 0
+    assert abs(a["succès"] - b["succès"]) < 1e-9
+
+
+def test_byte_map_se_dessine():
+    tr = []
+    b = E.avro_encode(R, E.PERSON_AVRO, tr)
+    fig = E.draw_byte_map(b, tr, title="avro")
+    assert fig is not None
