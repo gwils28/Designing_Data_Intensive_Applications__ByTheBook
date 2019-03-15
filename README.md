@@ -69,7 +69,7 @@ Lancer les tests : `pytest tests/`.
 | 1 | [Applications fiables, scalables et maintenables](notebooks/ch01_fiabilite_scalabilite_maintenabilite) | ✅ |
 | 2 | [Modèles de données et langages de requête](notebooks/ch02_modeles_de_donnees) | ✅ |
 | 3 | [Stockage et recherche](notebooks/ch03_stockage_et_recherche) | ✅ |
-| 4 | Encodage et évolution | 🚧 |
+| 4 | [Encodage et évolution](notebooks/ch04_encodage_et_evolution) | ✅ |
 | | *Partie II - Données distribuées* | |
 | 5 | Réplication | ⬜ |
 | 6 | Partitionnement | ⬜ |
