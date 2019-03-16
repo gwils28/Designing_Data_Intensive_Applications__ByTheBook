@@ -271,3 +271,101 @@ class ReplNode(Node):
         elif kind == "read":
             _, req, key = msg
             self.send(src, ("value", req, self.data.get(key), self.lsn))
+
+
+class Controller(Node):
+    """Contrôleur de basculement : surveille les battements du leader et promeut le suiveur
+    le plus à jour (`policy="best"`) ou un suiveur au hasard (`policy="random"`)."""
+
+    def __init__(self, name: str, data_nodes: list[str], leader: str, clients: list[str],
+                 timeout: float = 2.0, tick: float = 0.25, policy: str = "best", seed: int = 0):
+        super().__init__(name)
+        self.data_nodes = data_nodes
+        self.leader = leader
+        self.clients = clients
+        self.timeout = timeout
+        self.tick = tick
+        self.policy = policy
+        self.rng = random.Random(seed)
+        self.epoch = 0
+        self.last_hb = 0.0
+        self.positions: dict[str, int] = {}
+        self.electing = False
+        self.failovers: list[tuple[float, str, int]] = []   # (instant, nouveau leader, époque)
+
+    def on_start(self) -> None:
+        self.last_hb = self.local_time()
+        self.set_timer(self.tick, self._check)
+
+    def _check(self) -> None:
+        if not self.electing and self.local_time() - self.last_hb > self.timeout:
+            self.electing = True
+            self.positions = {}
+            for n in self.data_nodes:
+                if n != self.leader:
+                    self.send(n, ("pos?",))
+            self.set_timer(3 * self.tick, self._decide)
+        # rappel périodique du leader courant (répare les nœuds qui l'ont manqué)
+        if self.epoch > 0:
+            for n in self.data_nodes:
+                self.send(n, ("new_leader", self.epoch, self.leader))
+        self.set_timer(self.tick, self._check)
+
+    def _decide(self) -> None:
+        self.electing = False
+        if not self.positions:
+            self.last_hb = self.local_time()
+            return
+        if self.policy == "best":
+            new = max(sorted(self.positions), key=lambda n: self.positions[n])
+        else:
+            new = self.rng.choice(sorted(self.positions))
+        self.epoch += 1
+        self.leader = new
+        self.failovers.append((self.now, new, self.epoch))
+        self.send(new, ("promote", self.epoch))
+        for n in self.data_nodes + self.clients:
+            if n != new:
+                self.send(n, ("new_leader", self.epoch, new))
+        self.last_hb = self.local_time()
+
+    def on_message(self, src: str, msg) -> None:
+        if msg[0] == "hb":
+            if src == self.leader and msg[1] >= self.epoch:
+                self.last_hb = self.local_time()
+        elif msg[0] == "pos":
+            self.positions[src] = msg[1]
+
+
+class WriterClient(Node):
+    """Client qui écrit `key_i = i` à intervalle régulier et note les acquittements."""
+
+    def __init__(self, name: str, leader: str, period: float = 0.4, start: float = 0.2,
+                 stop: float = 20.0, prefix: str = "k"):
+        super().__init__(name)
+        self.leader = leader
+        self.period, self.start, self.stop = period, start, stop
+        self.prefix = prefix
+        self.i = 0
+        self.sent: dict[str, float] = {}
+        self.acked: dict[str, tuple[float, int, str]] = {}   # req -> (instant, lsn, nœud)
+
+    def on_start(self) -> None:
+        self.set_timer(self.start, self._write)
+
+    def _write(self) -> None:
+        if self.now > self.stop:
+            return
+        self.i += 1
+        req = f"{self.name}-{self.i}"
+        self.sent[req] = self.now
+        self.send(self.leader, ("write", req, f"{self.prefix}{self.i}", self.i))
+        self.set_timer(self.period, self._write)
+
+    def on_message(self, src: str, msg) -> None:
+        if msg[0] == "ok":
+            self.acked.setdefault(msg[1], (self.now, msg[2], src))
+        elif msg[0] == "new_leader":
+            self.leader = msg[2]
+        elif msg[0] == "redirect" and msg[2]:
+            self.leader = msg[2]
