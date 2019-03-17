@@ -369,3 +369,89 @@ class WriterClient(Node):
             self.leader = msg[2]
         elif msg[0] == "redirect" and msg[2]:
             self.leader = msg[2]
+
+
+def failover_scenario(mode: str = "async", fault: str = "crash", t_fault: float = 6.0,
+                      t_heal: float = 14.0, until: float = 22.0, timeout: float = 2.0,
+                      policy: str = "best", n_followers: int = 2, period: float = 0.4,
+                      latency=None, fencing: bool = True, ship_delay: dict | None = None,
+                      sample_dt: float = 0.1, seed: int = 0) -> dict:
+    """Rejoue une panne du leader `n1` et le basculement qui suit.
+
+    fault : "crash" (le leader s'arrête à t_fault et redémarre à t_heal) ou "partition"
+    ship_delay : retard d'expédition du journal vers chaque suiveur (ex. {"n2": 0.3}).
+    (partition : à t_fault, le leader et le client `c1` sont isolés du contrôleur et des suiveurs ;
+    la partition guérit à t_heal).
+
+    Renvoie un dict : net, nodes, controller, client, samples (état échantillonné tous les
+    sample_dt), lost (requêtes acquittées absentes du
+    journal final du leader), final_leader, split_brain (intervalle où deux nœuds se
+    croyaient leader, ou None).
+    """
+    names = [f"n{i}" for i in range(1, n_followers + 2)]
+    if latency is None:
+        def latency(rng, src, dst):
+            slow = {"n3"}
+            base = 0.15 if (src in slow or dst in slow) else 0.05
+            return base + rng.expovariate(1 / base)
+    net = Network(seed=seed, latency=latency)
+    nodes = {n: net.add(ReplNode(n, names, leader="n1", mode=mode, fencing=fencing,
+                                        ship_delay=ship_delay)) for n in names}
+    ctrl = net.add(Controller("controleur", names, "n1", ["c1"], timeout=timeout, policy=policy, seed=seed))
+    client = net.add(WriterClient("c1", "n1", period=period, stop=until - 2))
+    if fault == "crash":
+        net.at(t_fault, net.crash, "n1")
+        net.at(t_heal, net.recover, "n1")
+    elif fault == "partition":
+        net.at(t_fault, net.partition, {"n1", "c1"}, set(names[1:]) | {"controleur"})
+        net.at(t_heal, net.heal)
+    else:
+        raise ValueError(fault)
+    samples = []                 # (instant, {nœud: lsn}, {nœud: rôle ou "panne"})
+    t = 0.0
+    while t < until:
+        t = min(until, t + sample_dt)
+        net.run(until=t)
+        samples.append((t, {n: nodes[n].lsn for n in names},
+                        {n: (nodes[n].role if nodes[n].up else "panne") for n in names}))
+    leaders = [n for n in names if nodes[n].role == "leader"]
+    final = nodes[ctrl.leader] if ctrl.epoch else nodes["n1"]
+    in_final = {e.req for e in final.log}
+    lost = sorted((r for r in client.acked if r not in in_final), key=lambda r: int(r.split("-")[1]))
+    # split brain : périodes où deux nœuds **en marche** ont le rôle leader simultanément
+    events = sorted((t, n, role) for n in names for (t, role, _) in nodes[n].roles)
+    current, sb_start, sb = set(), None, []
+    for t, n, role in events:
+        if role == "leader":
+            current.add(n)
+        else:
+            current.discard(n)
+        if len(current) >= 2 and sb_start is None:
+            sb_start = t
+        elif len(current) < 2 and sb_start is not None:
+            sb.append((sb_start, t))
+            sb_start = None
+    if sb_start is not None:
+        sb.append((sb_start, until))
+    return {"net": net, "nodes": nodes, "controller": ctrl, "client": client, "lost": lost,
+            "samples": samples,
+            "final_leader": final.name, "leaders_at_end": leaders, "split_brain": sb or None}
+
+
+def write_latency_samples(mode: str, n_followers: int, rtt: np.ndarray, local: np.ndarray | float = 0.0) -> np.ndarray:
+    """Latence d'écriture vue du client (hors trajet client-leader) par statistiques d'ordre.
+
+    rtt : tableau (essais, n_followers) des allers-retours leader -> suiveur -> leader ;
+    local : écriture locale du leader. async : local ; semisync : local + min ;
+    quorum : local + k-ième plus petit (k = majorité moins le leader) ; sync : local + max.
+    """
+    need = needed_acks(mode, n_followers)
+    rtt = np.asarray(rtt, dtype=float)
+    if need == 0:
+        return np.broadcast_to(np.asarray(local, dtype=float), rtt.shape[:1]).copy()
+    return np.asarray(local) + np.sort(rtt, axis=1)[:, need - 1]
+
+
+# =====================================================================================
+# 2. Journaux de réplication : instructions contre lignes
+# =====================================================================================
