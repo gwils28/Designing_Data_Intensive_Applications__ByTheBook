@@ -455,3 +455,84 @@ def write_latency_samples(mode: str, n_followers: int, rtt: np.ndarray, local: n
 # =====================================================================================
 # 2. Journaux de réplication : instructions contre lignes
 # =====================================================================================
+
+
+class MiniDB:
+    """Base relationnelle miniature : tables de lignes indexées par clé primaire.
+
+    Chaque réplique a sa propre horloge (`clock_offset`) et son propre générateur
+    aléatoire : c'est ce qui fait diverger la réplication par instructions. Toute
+    modification est notée dans `changes` (journal logique par lignes).
+    """
+
+    def __init__(self, name: str = "db", clock_offset: float = 0.0, seed: int = 0):
+        self.name = name
+        self.clock_offset = clock_offset
+        self.rng = random.Random(seed)
+        self.tables: dict[str, dict[int, dict]] = {}
+        self.seq: dict[str, int] = {}
+        self.changes: list[tuple] = []
+
+    # fonctions non déterministes « SQL »
+    def now(self, t: float) -> float:
+        return round(t + self.clock_offset, 3)
+
+    def rand(self) -> float:
+        return round(self.rng.random(), 4)
+
+    # opérations sur les lignes (enregistrées dans le journal logique)
+    def insert(self, table: str, row: dict) -> int:
+        rows = self.tables.setdefault(table, {})
+        if "id" in row and row["id"] is not None:
+            pk = row["id"]
+            self.seq[table] = max(self.seq.get(table, 0), pk)
+        else:
+            pk = self.seq.get(table, 0) + 1
+            self.seq[table] = pk
+        full = dict(row, id=pk)
+        rows[pk] = full
+        self.changes.append(("insert", table, pk, dict(full)))
+        return pk
+
+    def update(self, table: str, pk: int, values: dict) -> None:
+        row = self.tables[table][pk]
+        row.update(values)
+        self.changes.append(("update", table, pk, dict(values)))
+
+    def delete(self, table: str, pk: int) -> None:
+        del self.tables[table][pk]
+        self.changes.append(("delete", table, pk, None))
+
+    def select(self, table: str, where: Callable[[dict], bool] | None = None) -> list[dict]:
+        rows = self.tables.get(table, {})
+        return [r for _, r in sorted(rows.items()) if where is None or where(r)]
+
+    def apply_change(self, change: tuple) -> None:
+        """Applique un enregistrement du journal logique (réplication par lignes)."""
+        op, table, pk, values = change
+        if op == "insert":
+            self.insert(table, values)
+        elif op == "update":
+            self.update(table, pk, values)
+        else:
+            self.delete(table, pk)
+
+    def state(self) -> dict:
+        return {t: {pk: dict(r) for pk, r in rows.items()} for t, rows in self.tables.items()}
+
+
+def replicate_statements(statements, leader: MiniDB, followers: list[MiniDB], times,
+                         follower_order: list[list[int]] | None = None) -> None:
+    """Réplication par instructions : chaque réplique ré-exécute chaque instruction.
+
+    statements : fonctions stmt(db, t) ; times : instant d'exécution de chaque instruction.
+    follower_order : pour chaque suiveur, l'ordre (indices) dans lequel il les exécute
+    (par défaut, le même que le leader).
+    """
+    for i, stmt in enumerate(statements):
+        stmt(leader, times[i])
+    for k, f in enumerate(followers):
+        order = follower_order[k] if follower_order else range(len(statements))
+        for i in order:
+            stmt = statements[i]
+            stmt(f, times[i] + 0.05 * (k + 1))     # un suiveur exécute un peu plus tard
