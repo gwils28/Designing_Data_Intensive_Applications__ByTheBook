@@ -536,3 +536,82 @@ def replicate_statements(statements, leader: MiniDB, followers: list[MiniDB], ti
         for i in order:
             stmt = statements[i]
             stmt(f, times[i] + 0.05 * (k + 1))     # un suiveur exécute un peu plus tard
+
+
+def replicate_rows(statements, leader: MiniDB, followers: list[MiniDB], times) -> list[tuple]:
+    """Réplication logique : le leader exécute, les suiveurs appliquent les lignes modifiées."""
+    start = len(leader.changes)
+    for i, stmt in enumerate(statements):
+        stmt(leader, times[i])
+    log = leader.changes[start:]
+    for f in followers:
+        for ch in log:
+            f.apply_change(ch)
+    return log
+
+
+# =====================================================================================
+# 3. Retard de réplication et garanties de session
+# =====================================================================================
+
+
+@dataclass
+class LagCluster:
+    """Un leader et des suiveurs qui appliquent le journal **dans l'ordre**.
+
+    write_times[i] : instant de validation du LSN i+1 sur le leader ;
+    apply_times[f][i] : instant où le suiveur f applique ce même LSN (croissant en i).
+    """
+
+    write_times: list[float]
+    apply_times: list[list[float]]
+
+    @property
+    def n_followers(self) -> int:
+        return len(self.apply_times)
+
+    def leader_lsn(self, t: float) -> int:
+        return bisect.bisect_right(self.write_times, t)
+
+    def follower_lsn(self, f: int, t: float) -> int:
+        return bisect.bisect_right(self.apply_times[f], t)
+
+    def lag_entries(self, f: int, t: float) -> int:
+        return self.leader_lsn(t) - self.follower_lsn(f, t)
+
+    def lag_seconds(self, f: int, t: float) -> float:
+        """Retard en temps : âge de la plus ancienne écriture validée pas encore appliquée."""
+        lf, ll = self.follower_lsn(f, t), self.leader_lsn(t)
+        return 0.0 if lf >= ll else t - self.write_times[lf]
+
+
+def lag_cluster(write_times, n_followers: int = 3, mean_lag=0.05, stalls=None, seed: int = 0,
+                dist: str = "exp") -> LagCluster:
+    """Construit un `LagCluster`.
+
+    mean_lag : retard moyen (scalaire ou un par suiveur). dist : "exp" (exponentiel) ou
+    "lognormal" (queue plus lourde, sigma = 1). stalls : liste de (suiveur, t0, t1) : le
+    suiveur n'applique rien entre t0 et t1 (blocage, réseau coupé, rattrapage).
+    """
+    rng = np.random.default_rng(seed)
+    wt = np.sort(np.asarray(write_times, dtype=float))
+    means = np.broadcast_to(np.asarray(mean_lag, dtype=float), (n_followers,))
+    stalls = stalls or []
+    apply_times = []
+    for f in range(n_followers):
+        if dist == "exp":
+            d = rng.exponential(means[f], len(wt))
+        else:
+            sigma = 1.0
+            d = rng.lognormal(math.log(means[f]) - sigma ** 2 / 2, sigma, len(wt))
+        a = wt + d
+        for (ff, t0, t1) in stalls:
+            if ff == f:
+                mask = (a >= t0) & (a < t1)
+                a[mask] = t1 + d[mask] * 0.1
+        a = np.maximum.accumulate(a)          # application dans l'ordre du journal
+        apply_times.append(a.tolist())
+    return LagCluster(wt.tolist(), apply_times)
+
+
+STRATEGIES = ("aleatoire", "leader", "fenetre", "collant", "jeton")
