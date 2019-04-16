@@ -615,3 +615,87 @@ def lag_cluster(write_times, n_followers: int = 3, mean_lag=0.05, stalls=None, s
 
 
 STRATEGIES = ("aleatoire", "leader", "fenetre", "collant", "jeton")
+
+
+def simulate_sessions(cluster: LagCluster, owners, strategy: str = "aleatoire",
+                      think: float = 0.2, extra_reads: int = 2, read_gap: float = 0.5,
+                      window: float = 1.0, seed: int = 0) -> dict:
+    """Chaque écriture i (LSN i+1, auteur owners[i]) est suivie d'une relecture par son auteur
+    après un temps de réflexion Exp(think), puis de `extra_reads` lectures espacées de
+    Exp(read_gap) par l'auteur.
+
+    Stratégies de routage des lectures : "aleatoire" (suiveur au hasard), "leader" (tout
+    au leader), "fenetre" (leader pendant `window` après sa dernière écriture), "collant"
+    (suiveur choisi par hachage de l'utilisateur), "jeton" (le client retient le plus
+    grand LSN vu ou écrit ; on cherche un suiveur au moins aussi avancé, sinon le leader).
+
+    Renvoie les taux d'anomalies « lire ses écritures » (relecture qui ne voit pas sa
+    propre écriture) et « lectures monotones » (lecture qui voit un état plus ancien que la
+    précédente du même utilisateur), et la part des lectures servies par le leader.
+    """
+    if strategy not in STRATEGIES:
+        raise ValueError(strategy)
+    rng = random.Random(seed)
+    nf = cluster.n_followers
+    reads = []          # (t, user, lsn écrit par cet utilisateur juste avant ou None)
+    for i, (t, u) in enumerate(zip(cluster.write_times, owners)):
+        tr = t + rng.expovariate(1 / think)
+        reads.append((tr, u, i + 1))
+        for _ in range(extra_reads):
+            tr += rng.expovariate(1 / read_gap)
+            reads.append((tr, u, None))
+    writes = sorted(((t, u, i + 1) for i, (t, u) in enumerate(zip(cluster.write_times, owners))))
+    events = sorted([(t, 0, u, l) for t, u, l in writes] + [(t, 1, u, l) for t, u, l in reads],
+                    key=lambda e: (e[0], e[1]))
+    last_write_t: dict = {}
+    token: dict = {}
+    last_seen: dict = {}
+    n_ryw = n_ryw_bad = n_reads = n_mono_bad = n_leader = 0
+    for t, kind, u, lsn in events:
+        if kind == 0:
+            last_write_t[u] = t
+            token[u] = max(token.get(u, 0), lsn)
+            continue
+        n_reads += 1
+        use_leader = False
+        if strategy == "leader":
+            use_leader = True
+        elif strategy == "fenetre":
+            use_leader = t - last_write_t.get(u, -1e9) < window
+        if use_leader:
+            seen = cluster.leader_lsn(t)
+        elif strategy == "collant":
+            f = (hash(("u", u)) % nf) if not isinstance(u, int) else (u * 2654435761 % 2 ** 32) % nf
+            seen = cluster.follower_lsn(f, t)
+        elif strategy == "jeton":
+            order = list(range(nf))
+            rng.shuffle(order)
+            seen = None
+            for f in order:
+                s = cluster.follower_lsn(f, t)
+                if s >= token.get(u, 0):
+                    seen = s
+                    break
+            if seen is None:
+                use_leader = True
+                seen = cluster.leader_lsn(t)
+        else:
+            seen = cluster.follower_lsn(rng.randrange(nf), t)
+        n_leader += use_leader
+        if lsn is not None:
+            n_ryw += 1
+            n_ryw_bad += seen < lsn
+        if seen < last_seen.get(u, 0):
+            n_mono_bad += 1
+        last_seen[u] = max(last_seen.get(u, 0), seen)
+        if strategy == "jeton":
+            token[u] = max(token.get(u, 0), seen)
+    return {"strategie": strategy, "lectures": n_reads,
+            "anomalies_ryw": n_ryw_bad / max(n_ryw, 1),
+            "anomalies_monotones": n_mono_bad / max(n_reads, 1),
+            "part_leader": n_leader / max(n_reads, 1)}
+
+
+# =====================================================================================
+# 4. Réplication multi-leader : topologies, conflits
+# =====================================================================================
