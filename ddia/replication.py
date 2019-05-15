@@ -699,3 +699,110 @@ def simulate_sessions(cluster: LagCluster, owners, strategy: str = "aleatoire",
 # =====================================================================================
 # 4. Réplication multi-leader : topologies, conflits
 # =====================================================================================
+
+
+def topology(kind: str, nodes: list[str]) -> dict[str, list[str]]:
+    """Voisins vers lesquels chaque leader transmet les écritures.
+
+    "circulaire" : chaque nœud transmet au suivant ; "etoile" : le premier nœud est la
+    racine, les autres ne parlent qu'à elle ; "tout" : chacun transmet à tous.
+    """
+    if kind == "circulaire":
+        return {n: [nodes[(i + 1) % len(nodes)]] for i, n in enumerate(nodes)}
+    if kind == "etoile":
+        root = nodes[0]
+        t = {root: nodes[1:]}
+        t.update({n: [root] for n in nodes[1:]})
+        return t
+    if kind == "tout":
+        return {n: [m for m in nodes if m != n] for n in nodes}
+    raise ValueError(kind)
+
+
+def propagate(topo: dict[str, list[str]], origin: str, failed=()) -> dict[str, int]:
+    """Nœuds atteints par une écriture faite sur `origin` (et nombre de sauts), quand les
+    nœuds de `failed` sont en panne (ils ne reçoivent ni ne transmettent rien)."""
+    failed = set(failed)
+    if origin in failed:
+        return {}
+    hops = {origin: 0}
+    frontier = [origin]
+    while frontier:
+        nxt = []
+        for n in frontier:
+            for m in topo[n]:
+                if m not in hops and m not in failed:
+                    hops[m] = hops[n] + 1
+                    nxt.append(m)
+        frontier = nxt
+    return hops
+
+
+class TopologyLeader(Node):
+    """Leader d'une configuration multi-leader qui transmet selon une topologie.
+
+    Chaque écriture porte la liste des nœuds déjà traversés (pour éviter les boucles) ;
+    `forward=False` (topologie tout-à-tout) : chaque leader n'envoie que ses propres
+    écritures, directement à tous. Chaque lien est FIFO (numéros de séquence, comme TCP).
+    Opérations : ("insert", row, value) et ("update", row, value). Une mise à jour reçue
+    avant l'insertion qu'elle modifie est une **violation de causalité** (comptée dans
+    `anomalies`) ; si `buffer=True`, elle est mise de côté jusqu'à l'insertion.
+    """
+
+    def __init__(self, name: str, neighbors: list[str], buffer: bool = False, forward: bool = True):
+        super().__init__(name)
+        self.neighbors = neighbors
+        self.buffer = buffer
+        self.forward = forward
+        self.rows: dict[str, Any] = {}
+        self.anomalies: list[tuple] = []
+        self.waiting: dict[str, list] = {}
+        self.received = 0
+        self.ignored = 0
+        self._out_seq: dict[str, int] = {}
+        self._in_next: dict[str, int] = {}
+        self._in_buf: dict[str, dict] = {}
+
+    def _send_fifo(self, dst: str, payload) -> None:
+        seq = self._out_seq.get(dst, 0)
+        self._out_seq[dst] = seq + 1
+        self.send(dst, ("w", seq, payload))
+
+    def local_write(self, op: str, row: str, value) -> None:
+        self._apply(op, row, value)
+        for m in self.neighbors:
+            self._send_fifo(m, (op, row, value, (self.name,)))
+
+    def _apply(self, op, row, value) -> None:
+        if op == "insert":
+            self.rows[row] = value
+            for v in self.waiting.pop(row, []):
+                self.rows[row] = v
+        elif row in self.rows:
+            self.rows[row] = value
+        else:
+            self.anomalies.append((self.now, op, row, value))
+            if self.buffer:
+                self.waiting.setdefault(row, []).append(value)
+
+    def on_message(self, src, msg) -> None:
+        _, seq, payload = msg
+        buf = self._in_buf.setdefault(src, {})
+        buf[seq] = payload
+        nxt = self._in_next.get(src, 0)
+        while nxt in buf:
+            self._handle(buf.pop(nxt))
+            nxt += 1
+        self._in_next[src] = nxt
+
+    def _handle(self, payload) -> None:
+        op, row, value, path = payload
+        self.received += 1
+        if self.name in path:
+            self.ignored += 1           # déjà traitée : on ne la réapplique pas
+            return
+        self._apply(op, row, value)
+        if self.forward:
+            for m in self.neighbors:
+                if m not in path:
+                    self._send_fifo(m, (op, row, value, path + (self.name,)))
