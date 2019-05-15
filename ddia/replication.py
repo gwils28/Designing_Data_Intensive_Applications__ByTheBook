@@ -806,3 +806,80 @@ class TopologyLeader(Node):
             for m in self.neighbors:
                 if m not in path:
                     self._send_fifo(m, (op, row, value, path + (self.name,)))
+
+
+def run_topology(kind: str = "tout", n_nodes: int = 3, n_rows: int = 200, gap: float = 0.3,
+                 latency=(0.05, 2.0), buffer: bool = False, seed: int = 0) -> dict:
+    """Pour chaque ligne, un client insère sur un leader au hasard, puis un autre client la
+    modifie `gap` plus tard sur le leader suivant (dès qu'il voit l'insertion).
+
+    Renvoie le nombre de violations de causalité observées et le nombre de messages.
+    """
+    names = [f"L{i}" for i in range(1, n_nodes + 1)]
+    topo = topology(kind, names)
+    net = Network(seed=seed, latency=latency)
+    nodes = {n: net.add(TopologyLeader(n, topo[n], buffer=buffer, forward=(kind != "tout")))
+             for n in names}
+    rng = random.Random(seed)
+    for k in range(n_rows):
+        a = rng.choice(names)
+        b = names[(names.index(a) + 1) % n_nodes]
+        t0 = k * 5.0
+        net.at(t0, nodes[a].local_write, "insert", f"r{k}", 0)
+
+        def make_upd(node, row):
+            def upd():
+                if row in node.rows:
+                    node.local_write("update", row, 1)
+                else:
+                    net.schedule(0.05, upd)        # attend d'avoir vu l'insertion
+            return upd
+        upd = make_upd(nodes[b], f"r{k}")
+        net.at(t0 + gap, upd)
+    net.run()
+    anomalies = sum(len(n.anomalies) for n in nodes.values())
+    final_ok = all(n.rows.get(f"r{k}") == 1 for n in nodes.values() for k in range(n_rows))
+    return {"topologie": kind, "violations": anomalies, "messages": len(net.trace),
+            "ignores": sum(n.ignored for n in nodes.values()), "etat_final_correct": final_ok,
+            "nodes": nodes, "net": net}
+
+
+def lww_resolve(versions):
+    """Dernier écrivain gagnant : garde la version au plus grand (horodatage, nœud).
+
+    versions : itérable de (horodatage, nœud, valeur). Les autres sont jetées en silence.
+    """
+    return max(versions, key=lambda v: (v[0], v[1]))
+
+
+def merge_union(siblings) -> set:
+    """Fusion naïve de paniers frères : l'union (les suppressions réapparaissent)."""
+    out = set()
+    for s in siblings:
+        out |= set(s)
+    return out
+
+
+def merge_with_tombstones(siblings) -> set:
+    """Fusion avec pierres tombales : chaque frère est (ajouts, suppressions) ; un article
+    supprimé dans un frère reste supprimé, sauf s'il a été ré-ajouté ailleurs **après**
+    (non modélisé ici : il faudrait des identifiants d'ajout, cf. OR-Set)."""
+    added, removed = set(), set()
+    for a, r in siblings:
+        added |= set(a)
+        removed |= set(r)
+    return added - removed
+
+
+# =====================================================================================
+# 5. Réplication sans leader (Dynamo)
+# =====================================================================================
+
+
+def p_stale_static(n: int, w: int, r: int) -> float:
+    """Probabilité qu'une lecture de r répliques tirées au hasard ne touche **aucune** des w
+    répliques qui ont l'écriture (les n - w autres ne l'ont pas encore) : C(n-w, r) / C(n, r).
+    Vaut 0 dès que w + r > n."""
+    if r > n - w:
+        return 0.0
+    return math.comb(n - w, r) / math.comb(n, r)
