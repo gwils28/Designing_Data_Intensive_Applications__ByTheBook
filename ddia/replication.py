@@ -883,3 +883,84 @@ def p_stale_static(n: int, w: int, r: int) -> float:
     if r > n - w:
         return 0.0
     return math.comb(n - w, r) / math.comb(n, r)
+
+
+def k_of_n(p_up: float, k: int, n: int) -> float:
+    """Probabilité qu'au moins k répliques sur n soient disponibles (pannes indépendantes)."""
+    return sum(math.comb(n, i) * p_up ** i * (1 - p_up) ** (n - i) for i in range(k, n + 1))
+
+
+def pbs_stale_probability(n: int, w: int, r: int, delta, trials: int = 20000,
+                          sampler: Callable | None = None, seed: int = 0) -> np.ndarray:
+    """Probabilité de lecture périmée « t-visibility » (Bailis et al., PBS) par Monte-Carlo.
+
+    Une écriture part vers les n répliques au temps 0 (délai aller W_i, retour A_i) ; elle
+    est acquittée au w-ième retour. Une lecture part `delta` après l'acquittement, arrive
+    à la réplique j après R_j et revient après S_j ; on garde les r premières réponses. La
+    lecture est périmée si aucune de ces r répliques n'avait reçu l'écriture quand la
+    lecture y est arrivée. `sampler(rng, size)` tire les délais (défaut : exponentiel de
+    moyenne 1).
+    """
+    rng = np.random.default_rng(seed)
+    if sampler is None:
+        def sampler(rng, size):
+            return rng.exponential(1.0, size)
+    W, A, R, S = (sampler(rng, (trials, n)) for _ in range(4))
+    ack = np.sort(W + A, axis=1)[:, w - 1]
+    deltas = np.atleast_1d(np.asarray(delta, dtype=float))
+    out = []
+    for d in deltas:
+        arrive = ack + d
+        t_arr = arrive[:, None] + R                  # arrivée de la lecture chez chaque réplique
+        has = W <= t_arr                              # la réplique avait-elle déjà l'écriture ?
+        order = np.argsort(t_arr + S, axis=1)[:, :r]  # les r premières réponses
+        fresh = np.take_along_axis(has, order, axis=1).any(axis=1)
+        out.append(1 - fresh.mean())
+    return np.array(out)
+
+
+class DynamoReplica(Node):
+    """Réplique d'une base à la Dynamo : clé -> (version, valeur), plus des indices (hints)
+    gardés pour une réplique indisponible."""
+
+    def __init__(self, name: str):
+        super().__init__(name)
+        self.store: dict[str, tuple[int, Any]] = {}
+        self.hints: dict[str, list] = {}
+        self.handoffs = 0
+
+    def _store(self, key, version, value) -> None:
+        if version > self.store.get(key, (0, None))[0]:
+            self.store[key] = (version, value)
+
+    def on_message(self, src, msg) -> None:
+        kind = msg[0]
+        if kind == "put":
+            _, req, key, version, value, hint_for = msg
+            if hint_for:
+                self.hints.setdefault(hint_for, []).append((key, version, value))
+                self.set_timer(0.5, self._handoff)
+            else:
+                self._store(key, version, value)
+            self.send(src, ("put_ok", req))
+        elif kind == "get":
+            _, req, key = msg
+            v = self.store.get(key, (0, None))
+            self.send(src, ("get_ok", req, key, v[0], v[1]))
+        elif kind == "repair":
+            _, key, version, value = msg
+            self._store(key, version, value)
+        elif kind == "handoff":
+            for key, version, value in msg[1]:
+                self._store(key, version, value)
+            self.send(src, ("handoff_ok", msg[2]))
+        elif kind == "handoff_ok":
+            target = msg[1]
+            self.handoffs += len(self.hints.pop(target, []))
+
+    def _handoff(self) -> None:
+        for target, items in list(self.hints.items()):
+            if items:
+                self.send(target, ("handoff", list(items), target))
+        if any(self.hints.values()):
+            self.set_timer(0.5, self._handoff)
