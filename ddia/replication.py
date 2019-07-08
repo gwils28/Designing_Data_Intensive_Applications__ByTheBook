@@ -964,3 +964,98 @@ class DynamoReplica(Node):
                 self.send(target, ("handoff", list(items), target))
         if any(self.hints.values()):
             self.set_timer(0.5, self._handoff)
+
+
+class DynamoClient(Node):
+    """Client (ou coordinateur) : écrit et lit en parallèle sur les n répliques de la clé.
+
+    Une écriture réussit après w acquittements, une lecture après r réponses ; la lecture
+    renvoie la valeur de plus grande version et, si `read_repair`, réécrit cette valeur
+    sur les répliques qui ont répondu une version plus ancienne. Avec `sloppy=True`, une
+    écriture qui n'a pas ses w acquittements après `timeout` est envoyée aux nœuds de
+    secours avec un indice (hinted handoff).
+    """
+
+    def __init__(self, name: str, replicas: list[str], n: int, w: int, r: int,
+                 fallbacks: list[str] | None = None, read_repair: bool = True,
+                 sloppy: bool = False, timeout: float = 1.0):
+        super().__init__(name)
+        self.replicas = replicas[:n]
+        self.n, self.w, self.r = n, w, r
+        self.fallbacks = fallbacks or []
+        self.read_repair = read_repair
+        self.sloppy = sloppy
+        self.timeout = timeout
+        self.req = itertools.count(1)
+        self.ops: dict[int, dict] = {}
+        self.results: list[dict] = []
+
+    def put(self, key: str, version: int, value) -> None:
+        rid = next(self.req)
+        self.ops[rid] = {"type": "put", "key": key, "version": version, "value": value,
+                         "t0": self.now, "acks": set(), "done": False}
+        for rep in self.replicas:
+            self.send(rep, ("put", rid, key, version, value, None))
+        self.set_timer(self.timeout, self._put_timeout, rid)
+
+    def _put_timeout(self, rid) -> None:
+        op = self.ops[rid]
+        if op["done"]:
+            return
+        if self.sloppy:
+            missing = [rep for rep in self.replicas if rep not in op["acks"]]
+            for rep, fb in zip(missing, self.fallbacks):
+                self.send(fb, ("put", rid, op["key"], op["version"], op["value"], rep))
+            self.set_timer(self.timeout, self._put_fail, rid)
+        else:
+            self._put_fail(rid)
+
+    def _put_fail(self, rid) -> None:
+        op = self.ops[rid]
+        if not op["done"]:
+            op["done"] = True
+            self.results.append({"type": "put", "key": op["key"], "ok": False, "t0": op["t0"],
+                                 "t1": self.now, "acks": len(op["acks"])})
+
+    def get(self, key: str) -> None:
+        rid = next(self.req)
+        self.ops[rid] = {"type": "get", "key": key, "t0": self.now, "replies": {}, "done": False}
+        for rep in self.replicas:
+            self.send(rep, ("get", rid, key))
+        self.set_timer(self.timeout, self._get_timeout, rid)
+
+    def _get_timeout(self, rid) -> None:
+        op = self.ops[rid]
+        if not op["done"]:
+            op["done"] = True
+            self.results.append({"type": "get", "key": op["key"], "ok": False, "t0": op["t0"],
+                                 "t1": self.now, "version": None, "value": None})
+
+    def on_message(self, src, msg) -> None:
+        kind = msg[0]
+        if kind == "put_ok":
+            op = self.ops.get(msg[1])
+            if op is None:
+                return
+            op["acks"].add(src)
+            if not op["done"] and len(op["acks"]) >= self.w:
+                op["done"] = True
+                self.results.append({"type": "put", "key": op["key"], "ok": True, "t0": op["t0"],
+                                     "t1": self.now, "acks": len(op["acks"])})
+        elif kind == "get_ok":
+            _, rid, key, version, value = msg
+            op = self.ops[rid]
+            op["replies"][src] = (version, value)
+            if not op["done"] and len(op["replies"]) >= self.r:
+                op["done"] = True
+                best = max(op["replies"].values(), key=lambda v: v[0])
+                self.results.append({"type": "get", "key": key, "ok": True, "t0": op["t0"],
+                                     "t1": self.now, "version": best[0], "value": best[1],
+                                     "from": sorted(op["replies"])})
+                op["best"] = best
+            if op.get("best") and self.read_repair:
+                best = op["best"]
+                for rep, (ver, _) in op["replies"].items():
+                    if ver < best[0] and rep not in op.setdefault("repaired", set()):
+                        op["repaired"].add(rep)
+                        self.send(rep, ("repair", key, best[0], best[1]))
