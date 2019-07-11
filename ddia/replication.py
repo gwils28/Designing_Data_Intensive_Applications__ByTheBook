@@ -1059,3 +1059,90 @@ class DynamoClient(Node):
                     if ver < best[0] and rep not in op.setdefault("repaired", set()):
                         op["repaired"].add(rep)
                         self.send(rep, ("repair", key, best[0], best[1]))
+
+
+def dynamo_cluster(n: int = 3, w: int = 2, r: int = 2, n_fallback: int = 0, latency=(0.2, 1.0),
+                   read_repair: bool = True, sloppy: bool = False, timeout: float = 1.5,
+                   seed: int = 0, clients=("client",)):
+    """Construit un réseau avec n répliques (r1..rn), des nœuds de secours (s1..) et des
+    clients. Renvoie (net, replicas, clients)."""
+    net = Network(seed=seed, latency=latency)
+    reps = {f"r{i}": net.add(DynamoReplica(f"r{i}")) for i in range(1, n + 1)}
+    fbs = [f"s{i}" for i in range(1, n_fallback + 1)]
+    for s in fbs:
+        reps[s] = net.add(DynamoReplica(s))
+    cl = {c: net.add(DynamoClient(c, [f"r{i}" for i in range(1, n + 1)], n, w, r, fallbacks=fbs,
+                                  read_repair=read_repair, sloppy=sloppy, timeout=timeout))
+          for c in clients}
+    return net, reps, cl
+
+
+def _h(*parts) -> str:
+    return hashlib.sha1("|".join(map(str, parts)).encode()).hexdigest()[:12]
+
+
+def merkle_tree(store: dict, n_leaves: int = 16) -> list[list[str]]:
+    """Arbre de Merkle d'un magasin clé -> valeur : les clés sont réparties dans n_leaves
+    seaux (n_leaves puissance de 2) par hachage ; chaque feuille est le hachage du contenu
+    trié de son seau, chaque nœud interne le hachage de ses deux enfants.
+
+    Renvoie la liste des niveaux, de la racine (niveau 0, une valeur) aux feuilles.
+    """
+    if n_leaves & (n_leaves - 1):
+        raise ValueError("n_leaves doit être une puissance de 2")
+    buckets = [[] for _ in range(n_leaves)]
+    for k in sorted(store):
+        buckets[int(_h(k), 16) % n_leaves].append((k, store[k]))
+    level = [_h(*b) for b in buckets]
+    levels = [level]
+    while len(level) > 1:
+        level = [_h(level[i], level[i + 1]) for i in range(0, len(level), 2)]
+        levels.append(level)
+    return levels[::-1]
+
+
+def merkle_diff(a: list[list[str]], b: list[list[str]]) -> tuple[list[int], int]:
+    """Compare deux arbres de même forme en descendant seulement dans les sous-arbres qui
+    diffèrent. Renvoie (seaux différents, nombre de hachages comparés)."""
+    compared = 0
+    frontier = [0]
+    for depth in range(len(a)):
+        nxt = []
+        for i in frontier:
+            compared += 1
+            if a[depth][i] != b[depth][i]:
+                nxt.append(i)
+        if depth + 1 < len(a):
+            frontier = [c for i in nxt for c in (2 * i, 2 * i + 1)]
+        else:
+            frontier = nxt
+    return frontier, compared
+
+
+# =====================================================================================
+# 6. Détecter les écritures concurrentes
+# =====================================================================================
+
+
+class VersionedKeyServer:
+    """Algorithme du livre pour **une** clé sur **une** réplique : numéro de version par
+    clé, frères (siblings) conservés tant qu'aucune écriture ne les a fusionnés.
+
+    put(value, version_lue) : écrase les frères de version <= version_lue, garde les autres
+    (concurrents), stocke la nouvelle valeur avec la version suivante. Renvoie
+    (nouvelle_version, frères restants {version: valeur}).
+    """
+
+    def __init__(self):
+        self.version = 0
+        self.siblings: dict[int, Any] = {}
+
+    def get(self) -> tuple[int, dict]:
+        return self.version, dict(self.siblings)
+
+    def put(self, value, read_version: int | None) -> tuple[int, dict]:
+        rv = read_version or 0
+        self.version += 1
+        self.siblings = {v: x for v, x in self.siblings.items() if v > rv}
+        self.siblings[self.version] = value
+        return self.version, dict(self.siblings)
