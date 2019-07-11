@@ -1146,3 +1146,76 @@ class VersionedKeyServer:
         self.siblings = {v: x for v, x in self.siblings.items() if v > rv}
         self.siblings[self.version] = value
         return self.version, dict(self.siblings)
+
+
+def vv_compare(a: dict, b: dict) -> str:
+    """Compare deux vecteurs de versions : "egal", "avant" (a -> b), "apres" ou "concurrent"."""
+    keys = set(a) | set(b)
+    le = all(a.get(k, 0) <= b.get(k, 0) for k in keys)
+    ge = all(a.get(k, 0) >= b.get(k, 0) for k in keys)
+    if le and ge:
+        return "egal"
+    if le:
+        return "avant"
+    if ge:
+        return "apres"
+    return "concurrent"
+
+
+def vv_merge(*vvs: dict) -> dict:
+    """Maximum composante par composante."""
+    out: dict = {}
+    for v in vvs:
+        for k, c in v.items():
+            out[k] = max(out.get(k, 0), c)
+    return out
+
+
+def vv_increment(vv: dict, node: str) -> dict:
+    out = dict(vv)
+    out[node] = out.get(node, 0) + 1
+    return out
+
+
+class DottedReplica:
+    """Réplique d'une base sans leader qui suit la causalité par vecteurs de versions
+    « pointés » (dotted version vectors, idée utilisée par Riak).
+
+    Par clé : des frères (point, valeur), où le point (réplique, compteur) identifie
+    l'écriture de façon unique, et un contexte causal (vecteur de versions) qui résume
+    tout ce que la réplique a vu. Le client renvoie à chaque écriture le contexte de sa
+    lecture : les frères couverts par ce contexte sont écrasés, les autres sont gardés.
+    """
+
+    def __init__(self, name: str):
+        self.name = name
+        self.keys: dict[str, tuple[list, dict]] = {}
+
+    def get(self, key: str) -> tuple[list, dict]:
+        sibs, ctx = self.keys.get(key, ([], {}))
+        return [v for _, v in sibs], dict(ctx)
+
+    def put(self, key: str, value, context: dict | None) -> tuple[list, dict]:
+        sibs, ctx = self.keys.get(key, ([], {}))
+        context = context or {}
+        counter = ctx.get(self.name, 0) + 1
+        dot = (self.name, counter)
+        keep = [(d, v) for d, v in sibs if context.get(d[0], 0) < d[1]]
+        keep.append((dot, value))
+        new_ctx = vv_merge(ctx, context, {self.name: counter})
+        self.keys[key] = (keep, new_ctx)
+        return self.get(key)
+
+    def sync_from(self, other: "DottedReplica", key: str) -> None:
+        """Anti-entropie pour une clé : fusionne l'état de `other` dans celui-ci."""
+        sa, ca = self.keys.get(key, ([], {}))
+        sb, cb = other.keys.get(key, ([], {}))
+        da, db = dict(sa), dict(sb)
+        keep = {}
+        for d, v in sa:
+            if d in db or cb.get(d[0], 0) < d[1]:
+                keep[d] = v
+        for d, v in sb:
+            if d in da or ca.get(d[0], 0) < d[1]:
+                keep[d] = v
+        self.keys[key] = (sorted(keep.items()), vv_merge(ca, cb))
