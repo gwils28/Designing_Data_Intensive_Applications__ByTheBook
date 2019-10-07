@@ -71,7 +71,7 @@ Lancer les tests : `pytest tests/`.
 | 3 | [Stockage et recherche](notebooks/ch03_stockage_et_recherche) | ✅ |
 | 4 | [Encodage et évolution](notebooks/ch04_encodage_et_evolution) | ✅ |
 | | *Partie II - Données distribuées* | |
-| 5 | Réplication | 🚧 |
+| 5 | [Réplication](notebooks/ch05_replication) | ✅ |
 | 6 | Partitionnement | ⬜ |
 | 7 | Transactions | ⬜ |
 | 8 | Les problèmes des systèmes distribués | ⬜ |
