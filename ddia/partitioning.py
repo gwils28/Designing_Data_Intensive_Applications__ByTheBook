@@ -113,3 +113,91 @@ def redis_slot(key: str, n_slots: int = 16384) -> int:
 # =====================================================================================
 # 2. Mesures de répartition
 # =====================================================================================
+
+
+def shard_loads(shard_ids, n_shards: int, weights=None) -> np.ndarray:
+    """Charge (nombre de clés ou somme des poids) reçue par chaque partition."""
+    return np.bincount(np.asarray(shard_ids, dtype=np.int64), weights=weights, minlength=n_shards)
+
+
+def imbalance(loads) -> float:
+    """Déséquilibre = charge maximale / charge moyenne (1 = parfaitement équitable)."""
+    loads = np.asarray(loads, dtype=float)
+    return float(loads.max() / loads.mean())
+
+
+def moved_fraction(before, after) -> float:
+    """Fraction des clés dont le propriétaire change entre deux affectations."""
+    before, after = np.asarray(before), np.asarray(after)
+    return float(np.mean(before != after))
+
+
+# =====================================================================================
+# 3. Partitionnement par plage de clés
+# =====================================================================================
+
+#: fréquence approximative des initiales des entrées d'un dictionnaire anglais
+#: (beaucoup de S, C, P ; très peu de X, Y, Z), pour des titres d'encyclopédie réalistes
+INITIAL_FREQ = {
+    "a": 6.0, "b": 5.5, "c": 9.5, "d": 5.8, "e": 4.0, "f": 4.2, "g": 3.4, "h": 3.9,
+    "i": 3.6, "j": 0.9, "k": 1.0, "l": 3.2, "m": 5.6, "n": 2.2, "o": 2.4, "p": 8.3,
+    "q": 0.5, "r": 5.4, "s": 11.5, "t": 5.3, "u": 2.6, "v": 1.6, "w": 2.6, "x": 0.1,
+    "y": 0.3, "z": 0.3,
+}
+
+
+def synthetic_titles(n: int, seed: int = 0) -> List[str]:
+    """`n` titres d'entrées distincts, avec une distribution réaliste des initiales."""
+    rng = np.random.default_rng(seed)
+    letters = np.array(list(INITIAL_FREQ))
+    p = np.array(list(INITIAL_FREQ.values()))
+    p /= p.sum()
+    first = rng.choice(letters, size=n, p=p)
+    alphabet = np.array(list("abcdefghijklmnopqrstuvwxyz"))
+    out = set()
+    titles = []
+    for f in first:
+        while True:
+            w = f + "".join(rng.choice(alphabet, size=int(rng.integers(3, 9))))
+            if w not in out:
+                out.add(w)
+                titles.append(w)
+                break
+    return titles
+
+
+def quantile_boundaries(keys: Sequence, n_shards: int) -> list:
+    """Frontières qui découpent l'échantillon trié `keys` en `n_shards` parts égales.
+
+    Renvoie les n_shards - 1 bornes inférieures des partitions 1..n-1 (la partition 0
+    commence à moins l'infini).
+    """
+    s = sorted(keys)
+    return [s[(i * len(s)) // n_shards] for i in range(1, n_shards)]
+
+
+class KeyRangePartitioner:
+    """Partitionnement par plage : la partition i contient [bornes[i-1], bornes[i]).
+
+    `boundaries` : liste triée des bornes inférieures des partitions 1..n-1.
+    """
+
+    def __init__(self, boundaries: Sequence):
+        self.boundaries = list(boundaries)
+        if self.boundaries != sorted(self.boundaries):
+            raise ValueError("les bornes doivent être triées")
+
+    @property
+    def n_shards(self) -> int:
+        return len(self.boundaries) + 1
+
+    def shard_of(self, key) -> int:
+        return bisect.bisect_right(self.boundaries, key)
+
+    def shards_for_range(self, lo, hi) -> List[int]:
+        """Partitions à interroger pour une requête de plage [lo, hi]."""
+        return list(range(self.shard_of(lo), self.shard_of(hi) + 1))
+
+    @classmethod
+    def from_sample(cls, keys: Sequence, n_shards: int) -> "KeyRangePartitioner":
+        return cls(quantile_boundaries(keys, n_shards))
