@@ -201,3 +201,75 @@ class KeyRangePartitioner:
     @classmethod
     def from_sample(cls, keys: Sequence, n_shards: int) -> "KeyRangePartitioner":
         return cls(quantile_boundaries(keys, n_shards))
+
+
+class DynamicRangeSharding:
+    """Partitionnement dynamique : une partition qui dépasse `max_keys` est scindée.
+
+    Les clés sont rangées par **position** : la clé elle-même (`hashed=False`,
+    partitionnement par plage de clés) ou son haché sur [0, 1) (`hashed=True`,
+    partitionnement par plage de hachés). Chaque scission coupe la partition à la clé
+    médiane et réécrit toutes ses clés dans deux nouveaux fichiers : on en tient le compte
+    dans `rewritten` (coût de la scission).
+
+    `presplit` : bornes initiales (pré-découpage d'une base vide).
+    """
+
+    def __init__(self, max_keys: int, hashed: bool = False, presplit: Sequence = ()):
+        self.max_keys = max_keys
+        self.hashed = hashed
+        self.bounds: list = list(presplit)          # bornes inférieures des partitions 1..
+        self.parts: List[list] = [[] for _ in range(len(self.bounds) + 1)]
+        self.writes: List[int] = [0] * len(self.parts)
+        self.n_inserted = 0
+        self.rewritten = 0
+        self.splits: List[Tuple[int, int]] = []    # (clés insérées au moment, clés réécrites)
+
+    def position(self, key):
+        if self.hashed:
+            if isinstance(key, (int, np.integer)):
+                return float(hash_unit(np.array([key]))[0])
+            return stable_hash(key, 52) / float(1 << 52)
+        return key
+
+    def shard_of(self, key) -> int:
+        return bisect.bisect_right(self.bounds, self.position(key))
+
+    def insert(self, key) -> int:
+        """Insère une clé ; renvoie l'indice de la partition qui l'a reçue."""
+        pos = self.position(key)
+        i = bisect.bisect_right(self.bounds, pos)
+        bisect.insort(self.parts[i], pos)
+        self.writes[i] += 1
+        self.n_inserted += 1
+        if len(self.parts[i]) > self.max_keys:
+            self._split(i)
+        return i
+
+    def _split(self, i: int) -> None:
+        part = self.parts[i]
+        mid = len(part) // 2
+        cut = part[mid]
+        if cut == part[0]:  # toutes les clés égales : impossible de couper
+            return
+        self.bounds.insert(i, cut)
+        self.parts[i:i + 1] = [part[:mid], part[mid:]]
+        w = self.writes[i]
+        self.writes[i:i + 1] = [w // 2, w - w // 2]
+        self.rewritten += len(part)
+        self.splits.append((self.n_inserted, len(part)))
+
+    @property
+    def n_shards(self) -> int:
+        return len(self.parts)
+
+    def sizes(self) -> np.ndarray:
+        return np.array([len(p) for p in self.parts])
+
+    def reset_writes(self) -> None:
+        self.writes = [0] * len(self.parts)
+
+
+# =====================================================================================
+# 4. Partitionnement par hachage et rééquilibrage
+# =====================================================================================
