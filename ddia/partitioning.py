@@ -424,3 +424,85 @@ def zipf_requests(n_keys: int, n_requests: int, s: float = 1.0, seed: int = 0) -
 def salted_key(key, salt: int, width: int = 2) -> str:
     """Clé salée : on ajoute un suffixe (00 à 99 pour width=2) pour éclater une clé chaude."""
     return f"{key}#{salt:0{width}d}"
+
+
+def salted_variants(key, n_salts: int) -> List[str]:
+    """Toutes les sous-clés d'une clé chaude salée (à lire et combiner en lecture)."""
+    w = max(2, len(str(n_salts - 1)))
+    return [salted_key(key, i, w) for i in range(n_salts)]
+
+
+def sensor_readings(n_sensors: int, duration: float, rate: float, seed: int = 0) -> Tuple[np.ndarray, np.ndarray]:
+    """Mesures de capteurs : (sensor_id, horodatage) triés par temps, `rate` mesures/s par capteur."""
+    rng = np.random.default_rng(seed)
+    n = rng.poisson(n_sensors * rate * duration)
+    t = np.sort(rng.uniform(0, duration, n))
+    sid = rng.integers(0, n_sensors, n)
+    return sid, t
+
+
+# =====================================================================================
+# 6. Index secondaires locaux et globaux
+# =====================================================================================
+
+COLORS_CARS = ["rouge", "noir", "blanc", "gris", "bleu", "argent", "vert", "jaune"]
+MAKES_CARS = ["Renault", "Peugeot", "Citroën", "Dacia", "Toyota", "Volkswagen", "Ford", "Fiat",
+              "Audi", "BMW", "Honda", "Kia"]
+
+
+def car_listings(n: int, seed: int = 0) -> List[dict]:
+    """Annonces de voitures d'occasion : id, couleur, marque, prix (popularités inégales)."""
+    rng = np.random.default_rng(seed)
+    pc = zipf_weights(len(COLORS_CARS), 0.8)
+    pm = zipf_weights(len(MAKES_CARS), 0.9)
+    colors = rng.choice(COLORS_CARS, n, p=pc)
+    makes = rng.choice(MAKES_CARS, n, p=pm)
+    prices = np.round(rng.lognormal(np.log(12000), 0.5, n), -2)
+    return [{"id": i, "color": str(c), "make": str(m), "price": float(p)}
+            for i, (c, m, p) in enumerate(zip(colors, makes, prices))]
+
+
+def doc_shard(doc_id: int, n_shards: int) -> int:
+    return int(mix64(np.array([doc_id]))[0] % U64(n_shards))
+
+
+def term_shard(term: str, n_shards: int) -> int:
+    return stable_hash(term) % n_shards
+
+
+class LocalIndexDB:
+    """Index secondaires **locaux** (partitionnés par document).
+
+    Chaque partition indexe seulement ses propres documents. Une écriture touche une seule
+    partition ; une requête sur un terme doit interroger toutes les partitions.
+    """
+
+    def __init__(self, n_shards: int, fields: Sequence[str] = ("color", "make")):
+        self.n = n_shards
+        self.fields = list(fields)
+        self.docs: List[Dict[int, dict]] = [dict() for _ in range(n_shards)]
+        self.index: List[Dict[str, set]] = [defaultdict(set) for _ in range(n_shards)]
+
+    def put(self, doc: dict) -> int:
+        """Insère un document ; renvoie le nombre de partitions touchées (toujours 1)."""
+        s = doc_shard(doc["id"], self.n)
+        self.docs[s][doc["id"]] = doc
+        for f in self.fields:
+            self.index[s][f"{f}:{doc[f]}"].add(doc["id"])
+        return 1
+
+    def query(self, field: str, value) -> Tuple[set, int]:
+        """IDs correspondant à field = value ; renvoie (ids, partitions interrogées)."""
+        term = f"{field}:{value}"
+        ids = set()
+        for s in range(self.n):
+            ids |= self.index[s].get(term, set())
+        return ids, self.n
+
+    def query_and(self, cond1: Tuple[str, object], cond2: Tuple[str, object]) -> Tuple[set, int, int]:
+        """Conjonction : chaque partition intersecte localement ; (ids, partitions, IDs transférés)."""
+        t1, t2 = f"{cond1[0]}:{cond1[1]}", f"{cond2[0]}:{cond2[1]}"
+        ids = set()
+        for s in range(self.n):
+            ids |= self.index[s].get(t1, set()) & self.index[s].get(t2, set())
+        return ids, self.n, len(ids)
