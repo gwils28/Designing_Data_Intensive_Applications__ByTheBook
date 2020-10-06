@@ -273,3 +273,81 @@ class DynamicRangeSharding:
 # =====================================================================================
 # 4. Partitionnement par hachage et rééquilibrage
 # =====================================================================================
+
+
+def mod_n_assign(keys, n: int) -> np.ndarray:
+    """Affectation naïve : nœud = haché(clé) mod N."""
+    return (mix64(np.asarray(keys)) % U64(n)).astype(np.int64)
+
+
+class FixedShardCluster:
+    """Nombre fixe de partitions (par ex. 1 000), plusieurs partitions par nœud.
+
+    La partition d'une clé ne change jamais (haché mod `n_shards`) ; seul change le
+    placement partitions -> nœuds. Ajouter un nœud lui fait « voler » des partitions aux
+    nœuds les plus chargés jusqu'à l'équilibre, sans rien déplacer d'autre.
+    `weights` : capacité relative des nœuds (un nœud deux fois plus puissant reçoit deux
+    fois plus de partitions).
+    """
+
+    def __init__(self, n_shards: int, nodes: Sequence[str], weights: Optional[Dict[str, float]] = None):
+        self.n_shards = n_shards
+        self.weights: Dict[str, float] = dict(weights or {})
+        self.owner: List[str] = [nodes[i % len(nodes)] for i in range(n_shards)]
+        for n in nodes:
+            self.weights.setdefault(n, 1.0)
+        self._rebalance()
+
+    def nodes(self) -> List[str]:
+        return list(self.weights)
+
+    def shard_of(self, keys) -> np.ndarray:
+        return (mix64(np.asarray(keys)) % U64(self.n_shards)).astype(np.int64)
+
+    def node_of_shard(self) -> np.ndarray:
+        idx = {n: i for i, n in enumerate(self.nodes())}
+        return np.array([idx[o] for o in self.owner])
+
+    def node_of(self, keys) -> np.ndarray:
+        """Indice (dans `nodes()`) du nœud propriétaire de chaque clé."""
+        return self.node_of_shard()[self.shard_of(keys)]
+
+    def owner_names(self, keys) -> np.ndarray:
+        names = np.array(self.owner)
+        return names[self.shard_of(keys)]
+
+    def shards_per_node(self) -> Dict[str, int]:
+        c = Counter(self.owner)
+        return {n: c.get(n, 0) for n in self.nodes()}
+
+    def _targets(self) -> Dict[str, int]:
+        total = sum(self.weights.values())
+        raw = {n: self.n_shards * w / total for n, w in self.weights.items()}
+        tgt = {n: int(math.floor(v)) for n, v in raw.items()}
+        rest = self.n_shards - sum(tgt.values())
+        for n in sorted(raw, key=lambda n: raw[n] - tgt[n], reverse=True)[:rest]:
+            tgt[n] += 1
+        return tgt
+
+    def _rebalance(self) -> List[int]:
+        """Déplace le minimum de partitions pour atteindre les cibles ; renvoie les partitions déplacées."""
+        tgt = self._targets()
+        count = Counter(self.owner)
+        excess = {n: count[n] - tgt.get(n, 0) for n in count}
+        to_move = []
+        for s, o in enumerate(self.owner):
+            if excess.get(o, 0) > 0:
+                to_move.append(s)
+                excess[o] -= 1
+        need = [n for n in tgt for _ in range(max(0, tgt[n] - count.get(n, 0)))]
+        for s, n in zip(to_move, need):
+            self.owner[s] = n
+        return to_move
+
+    def add_node(self, name: str, weight: float = 1.0) -> List[int]:
+        self.weights[name] = weight
+        return self._rebalance()
+
+    def remove_node(self, name: str) -> List[int]:
+        del self.weights[name]
+        return self._rebalance()
