@@ -351,3 +351,76 @@ class FixedShardCluster:
     def remove_node(self, name: str) -> List[int]:
         del self.weights[name]
         return self._rebalance()
+
+
+class HashRing:
+    """Anneau de hachage cohérent à jetons aléatoires (à la Cassandra / Dynamo).
+
+    Chaque nœud tire `vnodes` jetons uniformes sur [0, 1) ; une clé appartient au nœud du
+    premier jeton rencontré en tournant dans le sens croissant à partir de son haché.
+    Ajouter un nœud insère ses jetons : il récupère des morceaux des plages voisines,
+    sans que les autres clés ne bougent.
+    """
+
+    def __init__(self, nodes: Sequence[str] = (), vnodes: int = 1, seed: int = 0):
+        self.vnodes = vnodes
+        self.rng = np.random.default_rng(seed)
+        self.tokens = np.empty(0)
+        self.token_owner: List[str] = []
+        for n in nodes:
+            self.add_node(n)
+
+    def add_node(self, name: str, vnodes: Optional[int] = None) -> None:
+        k = vnodes or self.vnodes
+        new = self.rng.random(k)
+        tokens = np.concatenate([self.tokens, new])
+        owners = self.token_owner + [name] * k
+        order = np.argsort(tokens)
+        self.tokens = tokens[order]
+        self.token_owner = [owners[i] for i in order]
+
+    def remove_node(self, name: str) -> None:
+        keep = [i for i, o in enumerate(self.token_owner) if o != name]
+        self.tokens = self.tokens[keep]
+        self.token_owner = [self.token_owner[i] for i in keep]
+
+    def nodes(self) -> List[str]:
+        return list(dict.fromkeys(sorted(set(self.token_owner), key=self.token_owner.index)))
+
+    def owner_index(self, positions) -> np.ndarray:
+        """Indice du jeton propriétaire de chaque position sur [0, 1)."""
+        idx = np.searchsorted(self.tokens, np.asarray(positions), side="left")
+        return idx % len(self.tokens)
+
+    def node_of_positions(self, positions) -> np.ndarray:
+        owners = np.array(self.token_owner)
+        return owners[self.owner_index(positions)]
+
+    def node_of(self, keys) -> np.ndarray:
+        return self.node_of_positions(hash_unit(keys))
+
+    def ownership(self) -> Dict[str, float]:
+        """Fraction de l'anneau possédée par chaque nœud."""
+        t = self.tokens
+        arcs = np.diff(np.concatenate([[t[-1] - 1.0], t]))   # arc (jeton précédent, jeton]
+        out: Dict[str, float] = defaultdict(float)
+        for o, a in zip(self.token_owner, arcs):
+            out[o] += float(a)
+        return dict(out)
+
+
+def zipf_weights(n_keys: int, s: float = 1.0) -> np.ndarray:
+    """Probabilités d'une loi de Zipf : la clé de rang r est demandée ∝ 1 / r^s."""
+    w = 1.0 / np.arange(1, n_keys + 1) ** s
+    return w / w.sum()
+
+
+def zipf_requests(n_keys: int, n_requests: int, s: float = 1.0, seed: int = 0) -> np.ndarray:
+    """Suite de requêtes : indices de clés tirés selon Zipf (la clé 0 est la plus chaude)."""
+    rng = np.random.default_rng(seed)
+    return rng.choice(n_keys, size=n_requests, p=zipf_weights(n_keys, s))
+
+
+def salted_key(key, salt: int, width: int = 2) -> str:
+    """Clé salée : on ajoute un suffixe (00 à 99 pour width=2) pour éclater une clé chaude."""
+    return f"{key}#{salt:0{width}d}"
