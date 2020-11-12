@@ -623,3 +623,93 @@ class ShardServer(Node):
             _, version, mapping = msg
             if version > self.version:
                 self.version, self.view = version, dict(mapping)
+
+
+class RoutingTier(Node):
+    """Couche de routage : relaie chaque requête au propriétaire d'après sa vue de la carte."""
+
+    def __init__(self, name: str, view: Dict[int, str]):
+        super().__init__(name)
+        self.view = dict(view)
+        self.version = 0
+        self.pending: Dict[int, str] = {}
+
+    def on_message(self, src, msg):
+        kind = msg[0]
+        if kind == "req":
+            _, rid, shard = msg
+            self.pending[rid] = src
+            self.send(self.view[shard], ("req", rid, shard))
+        elif kind == "resp" and msg[1] in self.pending:
+            self.send(self.pending.pop(msg[1]), msg)
+        elif kind == "moved" and msg[1] in self.pending:
+            _, rid, shard, owner = msg
+            if owner:
+                self.view[shard] = owner
+            self.set_timer(0.0 if owner else 1.0, self._retry, rid, shard)
+        elif kind == "map":
+            _, version, mapping = msg
+            if version > self.version:
+                self.version, self.view = version, dict(mapping)
+
+    def _retry(self, rid, shard):
+        self.send(self.view[shard], ("req", rid, shard))
+
+
+class ShardClient(Node):
+    """Client : envoie des requêtes selon le mode et mesure leur temps de réponse.
+
+    mode = "any" (un nœud au hasard, qui relaie), "tier" (couche de routage) ou
+    "aware" (le client connaît la carte et va directement au propriétaire).
+    """
+
+    def __init__(self, name: str, mode: str, servers: Sequence[str], view: Dict[int, str],
+                 n_shards: int, n_requests: int, interval: float, seed: int = 0):
+        super().__init__(name)
+        self.mode = mode
+        self.servers = list(servers)
+        self.view = dict(view)
+        self.version = 0
+        self.n_shards = n_shards
+        self.n_requests = n_requests
+        self.interval = interval
+        self.rng = random.Random(seed)
+        self.start: Dict[int, float] = {}
+        self.shard_of_req: Dict[int, int] = {}
+        self.redirects: Counter = Counter()
+        self.done: Dict[int, Tuple[float, str]] = {}
+
+    def on_start(self):
+        t = 0.0
+        for rid in range(self.n_requests):
+            t += self.rng.expovariate(1.0 / self.interval)
+            self.net.at(t, self._issue, rid, self.rng.randrange(self.n_shards))
+
+    def _target(self, shard):
+        if self.mode == "any":
+            return self.rng.choice(self.servers)
+        if self.mode == "tier":
+            return "routeur"
+        return self.view[shard]
+
+    def _issue(self, rid, shard):
+        self.start[rid] = self.now
+        self.shard_of_req[rid] = shard
+        self.send(self._target(shard), ("req", rid, shard))
+
+    def on_message(self, src, msg):
+        kind = msg[0]
+        if kind == "resp":
+            self.done[msg[1]] = (self.now, msg[2])
+        elif kind == "moved":
+            _, rid, shard, owner = msg
+            self.redirects[rid] += 1
+            if owner:
+                self.view[shard] = owner
+                self.send(owner, ("req", rid, shard))
+            else:
+                self.set_timer(1.0, lambda: self.send(self._target(shard), ("req", rid, shard)))
+        elif kind == "map":
+            _, version, mapping = msg
+            if version > self.version:
+                self.version, self.view = version, dict(mapping)
