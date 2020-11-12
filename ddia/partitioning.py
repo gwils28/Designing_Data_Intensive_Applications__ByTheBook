@@ -506,3 +506,120 @@ class LocalIndexDB:
         for s in range(self.n):
             ids |= self.index[s].get(t1, set()) & self.index[s].get(t2, set())
         return ids, self.n, len(ids)
+
+
+class GlobalIndexDB:
+    """Index secondaire **global** (partitionné par terme).
+
+    Les documents sont répartis par ID ; l'index, lui, est réparti par terme : toutes les
+    entrées « color:rouge » sont sur la même partition d'index. Une requête sur un terme
+    lit une seule partition d'index ; une écriture touche la partition du document et
+    celles de chacun de ses termes.
+    """
+
+    def __init__(self, n_shards: int, fields: Sequence[str] = ("color", "make")):
+        self.n = n_shards
+        self.fields = list(fields)
+        self.docs: List[Dict[int, dict]] = [dict() for _ in range(n_shards)]
+        self.index: List[Dict[str, set]] = [defaultdict(set) for _ in range(n_shards)]
+
+    def put(self, doc: dict) -> int:
+        """Insère un document ; renvoie le nombre de partitions distinctes touchées."""
+        s = doc_shard(doc["id"], self.n)
+        self.docs[s][doc["id"]] = doc
+        touched = {s}
+        for f in self.fields:
+            term = f"{f}:{doc[f]}"
+            ts = term_shard(term, self.n)
+            self.index[ts][term].add(doc["id"])
+            touched.add(ts)
+        return len(touched)
+
+    def query(self, field: str, value) -> Tuple[set, int]:
+        term = f"{field}:{value}"
+        return set(self.index[term_shard(term, self.n)].get(term, set())), 1
+
+    def query_and(self, cond1, cond2) -> Tuple[set, int, int]:
+        """Conjonction : les deux listes de postings sont rapatriées et intersectées.
+
+        Renvoie (ids, partitions d'index lues, IDs transférés sur le réseau)."""
+        t1, t2 = f"{cond1[0]}:{cond1[1]}", f"{cond2[0]}:{cond2[1]}"
+        s1, s2 = term_shard(t1, self.n), term_shard(t2, self.n)
+        p1 = self.index[s1].get(t1, set())
+        p2 = self.index[s2].get(t2, set())
+        moved = (len(p1) + len(p2)) if s1 != s2 else min(len(p1), len(p2))
+        return p1 & p2, len({s1, s2}), moved
+
+
+def scatter_gather_latency(n_shards: int, n_queries: int, sampler: Callable, seed: int = 0) -> np.ndarray:
+    """Latence de requêtes envoyées en parallèle à `n_shards` partitions.
+
+    `sampler(rng, size)` tire des temps de réponse d'une partition ; la requête complète
+    attend la plus lente (maximum sur les partitions).
+    """
+    rng = np.random.default_rng(seed)
+    t = sampler(rng, (n_queries, n_shards))
+    return t.max(axis=1)
+
+
+def lognormal_sampler(median: float = 5.0, sigma: float = 0.6, slow_p: float = 0.01,
+                      slow_factor: float = 20.0) -> Callable:
+    """Temps de réponse d'une partition : log-normal + 1 % de réponses très lentes (GC, disque)."""
+    def sample(rng, size):
+        t = rng.lognormal(np.log(median), sigma, size)
+        slow = rng.random(size) < slow_p
+        return np.where(slow, t * slow_factor, t)
+    return sample
+
+
+# =====================================================================================
+# 7. Routage des requêtes (simulation sur ddia.sim)
+# =====================================================================================
+
+
+class ShardServer(Node):
+    """Nœud de stockage : possède des partitions et une vue (peut-être périmée) de la carte.
+
+    `forward=True` : une requête mal adressée est relayée au propriétaire (approche 1, tout
+    nœud accepte les requêtes) ; sinon le nœud répond `moved` avec le propriétaire qu'il
+    connaît (redirection à la Redis Cluster).
+    """
+
+    def __init__(self, name: str, owned: Iterable[int], view: Dict[int, str], forward: bool = False):
+        super().__init__(name)
+        self.owned = set(owned)
+        self.view = dict(view)
+        self.version = 0
+        self.forward = forward
+        self.relay: Dict[int, str] = {}
+        self.served = 0
+
+    def on_message(self, src, msg):
+        kind = msg[0]
+        if kind == "req":
+            _, rid, shard = msg
+            if shard in self.owned:
+                self.served += 1
+                self.send(src, ("resp", rid, self.name))
+            elif self.forward and self.view[shard] != self.name:
+                self.relay[rid] = src
+                self.send(self.view[shard], ("req", rid, shard))
+            else:
+                owner = self.view[shard]
+                if owner == self.name:     # vue en retard sur la passation : on ne sait pas
+                    owner = None
+                self.send(src, ("moved", rid, shard, owner))
+        elif kind == "resp" and msg[1] in self.relay:
+            self.send(self.relay.pop(msg[1]), msg)
+        elif kind == "moved" and msg[1] in self.relay:
+            # le nœud relayé ne possède plus la partition : on met à jour et on relaie encore
+            _, rid, shard, owner = msg
+            if owner:
+                self.view[shard] = owner
+                self.send(owner, ("req", rid, shard))
+            else:
+                self.send(self.relay.pop(rid), msg)
+        elif kind == "map":
+            _, version, mapping = msg
+            if version > self.version:
+                self.version, self.view = version, dict(mapping)
