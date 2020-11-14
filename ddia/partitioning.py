@@ -713,3 +713,97 @@ class ShardClient(Node):
             _, version, mapping = msg
             if version > self.version:
                 self.version, self.view = version, dict(mapping)
+
+
+class Coordinator(Node):
+    """Service de coordination (rôle de ZooKeeper / etcd) : détient la carte de référence.
+
+    `move(shard, new_owner)` : passation instantanée entre les deux nœuds de stockage
+    (l'ancien cesse de servir, le nouveau commence, et tous deux connaissent aussitôt le
+    nouveau propriétaire), puis notification de la nouvelle
+    version de la carte à tous les abonnés (messages soumis aux délais du réseau).
+    """
+
+    def __init__(self, name: str, mapping: Dict[int, str], subscribers: Sequence[str]):
+        super().__init__(name)
+        self.mapping = dict(mapping)
+        self.version = 0
+        self.subscribers = list(subscribers)
+
+    def move(self, shard: int, new_owner: str) -> None:
+        old = self.mapping[shard]
+        self.net[old].owned.discard(shard)
+        self.net[new_owner].owned.add(shard)
+        # les deux nœuds qui participent à la passation connaissent le nouveau propriétaire
+        self.net[old].view[shard] = new_owner
+        self.net[new_owner].view[shard] = new_owner
+        self.mapping[shard] = new_owner
+        self.version += 1
+        for s in self.subscribers:
+            self.send(s, ("map", self.version, dict(self.mapping)))
+
+
+def routing_experiment(mode: str, n_servers: int = 4, n_shards: int = 16, n_requests: int = 400,
+                       interval: float = 0.25, moves: Sequence[Tuple[float, int, str]] = (),
+                       latency=(0.4, 0.6), notify=("servers", "router"), seed: int = 0):
+    """Simule le routage de `n_requests` requêtes ; renvoie (enregistrements, réseau).
+
+    moves : déplacements (instant, partition, nouveau propriétaire) décidés par le
+    coordinateur. notify : abonnés notifiés par le coordinateur ("servers", "router",
+    "client"). Chaque enregistrement : rid, t0, latence, sauts (messages réseau échangés
+    pour la requête), redirections, nœud qui a servi.
+    """
+    servers = [f"n{i}" for i in range(n_servers)]
+    mapping = {s: servers[s % n_servers] for s in range(n_shards)}
+    net = Network(seed=seed, latency=latency)
+    for name in servers:
+        owned = [s for s, o in mapping.items() if o == name]
+        net.add(ShardServer(name, owned, mapping, forward=(mode == "any")))
+    if mode == "tier":
+        net.add(RoutingTier("routeur", mapping))
+    client = net.add(ShardClient("client", mode, servers, mapping, n_shards, n_requests, interval, seed))
+    subs = []
+    if "servers" in notify:
+        subs += servers
+    if "router" in notify and mode == "tier":
+        subs.append("routeur")
+    if "client" in notify:
+        subs.append("client")
+    coord = net.add(Coordinator("coord", mapping, subs))
+    for t, shard, owner in moves:
+        net.at(t, coord.move, shard, owner)
+    net.run()
+    hops = Counter(d.msg[1] for d in net.trace if d.msg[0] in ("req", "resp", "moved"))
+    recs = []
+    for rid, t0 in client.start.items():
+        if rid in client.done:
+            t1, by = client.done[rid]
+            recs.append({"rid": rid, "t0": t0, "latence": t1 - t0, "sauts": hops[rid],
+                         "redirections": client.redirects[rid], "servi_par": by,
+                         "partition": client.shard_of_req[rid]})
+    return recs, net
+
+
+def gossip_rounds(n_nodes: int, fanout: int = 1, seed: int = 0) -> List[int]:
+    """Diffusion épidémique (push) : nombre de nœuds informés après chaque tour.
+
+    À chaque tour, chaque nœud informé contacte `fanout` nœuds tirés au hasard. Le nombre
+    de tours pour informer tout le monde croît comme log2(n) + ln(n).
+    """
+    rng = np.random.default_rng(seed)
+    informed = np.zeros(n_nodes, dtype=bool)
+    informed[0] = True
+    hist = [1]
+    while not informed.all():
+        src = np.flatnonzero(informed)
+        targets = rng.integers(0, n_nodes, size=src.size * fanout)
+        informed[targets] = True
+        hist.append(int(informed.sum()))
+        if len(hist) > 10 * (int(math.log2(n_nodes)) + 10):
+            break
+    return hist
+
+
+# =====================================================================================
+# 8. Opérations : rééquilibrage automatique et défaillance en cascade
+# =====================================================================================
