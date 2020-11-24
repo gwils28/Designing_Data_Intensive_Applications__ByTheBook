@@ -807,3 +807,56 @@ def gossip_rounds(n_nodes: int, fanout: int = 1, seed: int = 0) -> List[int]:
 # =====================================================================================
 # 8. Opérations : rééquilibrage automatique et défaillance en cascade
 # =====================================================================================
+
+
+def rebalancing_cascade(n_nodes: int = 10, base_util: float = 0.70, spread: float = 0.10,
+                        spike_factor: float = 1.45, spike: Tuple[int, int] = (10, 25),
+                        timeout: float = 10.0, patience: int = 2, migration_cost: float = 0.04,
+                        migration_steps: int = 15, auto: bool = True,
+                        steps: int = 120) -> Dict[str, np.ndarray]:
+    """Modèle à pas de temps (1 pas = 1 minute) d'un cluster de `n_nodes` nœuds.
+
+    Le nœud i a une charge de base comprise entre base_util - spread et base_util + spread
+    (les partitions ne sont jamais parfaitement égales) ; son temps de réponse relatif vaut
+    1 / (1 - rho) (file M/M/1, en multiples du temps de service), infini si rho >= 1.
+    Le nœud 0 subit un pic temporaire (`spike_factor` × sa charge pendant `spike`).
+
+    Avec `auto=True`, un nœud dont le temps de réponse dépasse `timeout` pendant `patience`
+    pas est déclaré mort (à tort : il est seulement lent). Sa charge est répartie sur les
+    survivants, et le transfert de ses partitions ajoute `migration_cost` d'utilisation à
+    chaque survivant pendant `migration_steps` pas. Avec `auto=False`, personne n'est
+    exclu : le pic passe. Renvoie les séries : nœuds actifs, rho max et moyen, temps de
+    réponse max (plafonné à 100).
+    """
+    alive = np.ones(n_nodes, dtype=bool)
+    load = base_util + np.linspace(-spread, spread, n_nodes)[::-1]
+    strikes = np.zeros(n_nodes, dtype=int)
+    migrations: List[int] = []   # pas de fin de chaque transfert en cours
+    out: Dict[str, list] = {"actifs": [], "rho_max": [], "rt_max": [], "rho_moyen": [], "exclusions": []}
+    for t in range(steps):
+        extra = migration_cost * sum(1 for end in migrations if t < end)
+        rho = load + extra
+        if spike[0] <= t < spike[1]:
+            rho[0] = load[0] * spike_factor + extra
+        rt = np.where(rho < 1, 1.0 / np.maximum(1e-9, 1 - rho), np.inf)
+        excluded = []
+        if auto and alive.any():
+            strikes = np.where(alive & (rt > timeout), strikes + 1, 0)
+            for d in np.flatnonzero(strikes >= patience):
+                alive[d] = False
+                strikes[d] = 0
+                excluded.append(int(d))
+                survivors = np.flatnonzero(alive)
+                if survivors.size:
+                    load[survivors] += load[d] / survivors.size
+                    migrations.append(t + migration_steps)
+                load[d] = 0.0
+        a = alive.copy()
+        out["actifs"].append(int(a.sum()))
+        out["exclusions"].append(excluded)
+        out["rho_max"].append(float(rho[a].max()) if a.any() else np.nan)
+        out["rho_moyen"].append(float(rho[a].mean()) if a.any() else np.nan)
+        out["rt_max"].append(float(min(100.0, rt[a].max())) if a.any() else np.nan)
+    res = {k: np.array(v) for k, v in out.items() if k != "exclusions"}
+    res["exclusions"] = out["exclusions"]
+    return res
