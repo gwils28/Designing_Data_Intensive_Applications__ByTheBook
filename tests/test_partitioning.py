@@ -100,3 +100,40 @@ def test_index_locaux_et_globaux():
     a, _, _ = loc.query_and(("color", "rouge"), ("make", "Renault"))
     b, _, moved = glo.query_and(("color", "rouge"), ("make", "Renault"))
     assert a == b and moved >= len(a)
+
+
+def test_scatter_gather():
+    s = P.lognormal_sampler()
+    one = P.scatter_gather_latency(1, 20_000, s, seed=1)
+    many = P.scatter_gather_latency(50, 20_000, s, seed=1)
+    assert np.median(many) > 2 * np.median(one)
+
+
+@pytest.mark.parametrize("mode", ["any", "tier", "aware"])
+def test_routage(mode):
+    recs, net = P.routing_experiment(mode, n_requests=200, moves=[(10, 3, "n1"), (20, 7, "n0")])
+    assert len(recs) == 200
+    hops = {r["sauts"] for r in recs if r["redirections"] == 0}
+    if mode == "aware":
+        assert min(hops) == 2
+    if mode == "tier":
+        assert min(hops) == 4
+
+
+def test_routage_redirection_apres_deplacement():
+    recs, _ = P.routing_experiment("aware", n_requests=300, moves=[(5, 3, "n1")], notify=())
+    moved = [r for r in recs if r["partition"] == 3 and r["t0"] > 6]
+    assert moved and moved[0]["redirections"] == 1 and all(r["servi_par"] == "n1" for r in moved)
+    assert sum(r["redirections"] for r in moved) == 1    # le client a mis sa carte à jour
+
+
+def test_gossip():
+    h = P.gossip_rounds(1024, seed=0)
+    assert h[-1] == 1024 and 10 < len(h) < 30
+
+
+def test_cascade():
+    auto = P.rebalancing_cascade(auto=True)
+    manual = P.rebalancing_cascade(auto=False)
+    assert auto["actifs"][-1] < 5 and manual["actifs"].min() == 10
+    assert P.rebalancing_cascade(base_util=0.5)["actifs"][-1] == 10
