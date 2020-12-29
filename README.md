@@ -72,7 +72,7 @@ Lancer les tests : `pytest tests/`.
 | 4 | [Encodage et évolution](notebooks/ch04_encodage_et_evolution) | ✅ |
 | | *Partie II - Données distribuées* | |
 | 5 | [Réplication](notebooks/ch05_replication) | ✅ |
-| 6 | Partitionnement | 🚧 |
+| 6 | [Partitionnement](notebooks/ch06_partitionnement) | ✅ |
 | 7 | Transactions | ⬜ |
 | 8 | Les problèmes des systèmes distribués | ⬜ |
 | 9 | Cohérence et consensus | ⬜ |
