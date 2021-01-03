@@ -138,3 +138,74 @@ def transfer_txs(n: int = 3, seed: int = 0, accounts=("A", "B", "C"), start: int
 # =====================================================================================
 # 2. Moteur transactionnel MVCC
 # =====================================================================================
+
+class _Deleted:
+    def __repr__(self):
+        return "<supprimé>"
+
+
+DELETED = _Deleted()
+ACTIVE, COMMITTED, ABORTED = "active", "committed", "aborted"
+
+LEVELS = ["none", "read_uncommitted", "read_committed", "snapshot", "serializable_ssi",
+          "serializable_2pl"]
+LEVEL_LABELS = {
+    "none": "aucune isolation",
+    "read_uncommitted": "read uncommitted",
+    "read_committed": "read committed",
+    "snapshot": "snapshot isolation",
+    "snapshot_nodetect": "snapshot (sans détection)",
+    "serializable_ssi": "sérialisable (SSI)",
+    "serializable_2pl": "sérialisable (2PL)",
+}
+_SNAPSHOT = ("snapshot", "serializable_ssi")
+
+
+# --- opérations (ce que les programmes « yield ») -----------------------------------
+def R(key):
+    """Lecture d'une clé (renvoie None si elle n'existe pas)."""
+    return ("read", key)
+
+
+def W(key, value):
+    """Écriture (insertion ou mise à jour) d'une clé."""
+    return ("write", key, value)
+
+
+def D(key):
+    """Suppression d'une clé."""
+    return ("write", key, DELETED)
+
+
+def S(pred, label: str = "scan"):
+    """Requête par prédicat : renvoie {clé: valeur} des lignes visibles qui satisfont
+    pred(clé, valeur). Exemple : S(lambda k, v: k.startswith("doc:") and v, "de garde")."""
+    return ("scan", pred, label)
+
+
+def INC(key, delta=1):
+    """Incrément atomique côté base (UPDATE t SET v = v + 1) : verrou exclusif puis lecture
+    de la dernière version validée. Renvoie la nouvelle valeur."""
+    return ("incr", key, delta)
+
+
+def RFU(key):
+    """SELECT ... FOR UPDATE sur une clé : verrou exclusif puis lecture."""
+    return ("read_for_update", key)
+
+
+def SFU(pred, label: str = "scan for update"):
+    """SELECT ... WHERE pred FOR UPDATE : verrouille exclusivement les lignes trouvées
+    (mais pas celles qui n'existent pas encore : les fantômes passent au travers)."""
+    return ("scan", pred, label, True)
+
+
+ABORT = ("abort",)
+_COMMIT = ("commit",)
+
+
+@dataclass
+class Version:
+    value: Any
+    xmin: int                    # transaction qui a créé la version
+    xmax: int | None = None      # transaction qui l'a remplacée (affichage seulement)
