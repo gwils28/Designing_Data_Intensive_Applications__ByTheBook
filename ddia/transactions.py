@@ -553,3 +553,75 @@ class Engine:
 # =====================================================================================
 # 3. Ordonnanceur : entrelacer des transactions écrites comme des générateurs
 # =====================================================================================
+
+def _fmt(op, result=None) -> str:
+    kind = op[0]
+    if kind == "read":
+        return f"r({op[1]})={result}"
+    if kind == "read_for_update":
+        return f"r⁺({op[1]})={result}"
+    if kind == "write":
+        if op[2] is DELETED:
+            return f"supprime({op[1]})"
+        val = str(op[2])
+        return f"w({op[1]})" if len(val) > 10 else f"w({op[1]}={val})"
+    if kind == "incr":
+        return f"{op[1]}+={op[2]}→{result}"
+    if kind == "scan":
+        n = len(result) if isinstance(result, dict) else "?"
+        return f"{op[2]} → {n}"
+    if kind == "commit":
+        return "commit"
+    if kind == "abort":
+        return "abort"
+    return str(op)
+
+
+def _short(op) -> str:
+    kind = op[0]
+    if kind in ("read", "read_for_update"):
+        return f"r({op[1]})"
+    if kind in ("write", "incr"):
+        return f"w({op[1]})"
+    if kind == "scan":
+        return op[2]
+    return kind
+
+
+@dataclass
+class _Slot:
+    name: str
+    factory: Callable
+    level: str | None
+    gen: Any = None
+    tx: Tx | None = None
+    pending: Any = None
+    blocked: Blocked | None = None
+    done: bool = False
+    outcome: str = ""
+    reads: list = field(default_factory=list)
+    attempts: int = 0
+    retries_left: int = 0
+    waited: int = 0
+    wait_since: int = 0
+
+
+@dataclass
+class RunResult:
+    engine: Engine
+    history: pd.DataFrame
+    outcomes: dict
+    reads: dict
+    attempts: dict
+
+    @property
+    def final(self) -> dict:
+        return self.engine.snapshot_state()
+
+    @property
+    def committed(self) -> list:
+        return [n for n, o in self.outcomes.items() if o == "commit"]
+
+    @property
+    def aborted(self) -> list:
+        return [n for n, o in self.outcomes.items() if o != "commit"]
