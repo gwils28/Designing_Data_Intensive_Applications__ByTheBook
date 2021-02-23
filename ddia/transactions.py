@@ -625,3 +625,173 @@ class RunResult:
     @property
     def aborted(self) -> list:
         return [n for n, o in self.outcomes.items() if o != "commit"]
+
+
+class Scheduler:
+    """Exécute des programmes transactionnels pas à pas.
+
+    Un programme est une fonction génératrice sans argument qui « yield » des opérations
+    (R, W, S, INC, RFU, SFU, ABORT) et reçoit leur résultat ; la validation a lieu quand
+    le générateur se termine (elle occupe un pas). Une opération bloquée attend : elle est
+    retentée à chaque libération de verrous (réveil). Un cycle dans le graphe d'attente
+    est un interblocage : la transaction qui ferme le cycle est abandonnée.
+    """
+
+    def __init__(self, engine: Engine, retries: int = 0):
+        self.engine = engine
+        self.retries = retries
+        self.slots: dict[str, _Slot] = {}
+        self.events: list[dict] = []
+        self.step_no = 0
+        self._wait_counter = 0
+
+    def add(self, name: str, factory: Callable, level: str | None = None) -> None:
+        self.slots[name] = _Slot(name, factory, level, retries_left=self.retries)
+
+    # ------------------------------------------------------------------ mécanique
+    def _log(self, slot, text, kind, wake=False):
+        self.events.append(dict(pas=self.step_no, tx=slot.name,
+                                txid=slot.tx.txid if slot.tx else None,
+                                op=text, type=kind, réveil=wake))
+
+    def _start(self, slot):
+        slot.attempts += 1
+        slot.tx = self.engine.begin(slot.name, slot.level)
+        slot.gen = slot.factory()
+        slot.reads = []
+        try:
+            slot.pending = next(slot.gen)
+        except StopIteration:
+            slot.pending = _COMMIT
+
+    def _deadlock(self, start: str):
+        """Cycle du graphe d'attente passant par `start` (liste de noms) ou None."""
+        by_txid = {s.tx.txid: s for s in self.slots.values() if s.tx is not None}
+        parent = {start: None}
+        stack = [start]
+        while stack:
+            n = stack.pop()
+            s = self.slots[n]
+            if s.blocked is None:
+                continue
+            for t in s.blocked.waits_for:
+                o = by_txid.get(t)
+                if o is None or o.tx.status != ACTIVE:
+                    continue
+                if o.name == start:
+                    cycle, m = [], n
+                    while m is not None:
+                        cycle.append(m)
+                        m = parent[m]
+                    return cycle
+                if o.name not in parent:
+                    parent[o.name] = n
+                    stack.append(o.name)
+        return None
+
+    def _finish(self, slot, outcome):
+        slot.outcome = outcome
+        if outcome != "commit" and slot.retries_left > 0:
+            slot.retries_left -= 1
+            slot.tx = None
+            slot.blocked = None
+            return
+        slot.done = True
+        slot.blocked = None
+
+    def _exec(self, slot, wake=False) -> str:
+        """Exécute l'opération en attente de `slot`. Renvoie 'ok', 'blocked', 'end'."""
+        op = slot.pending
+        try:
+            res = self.engine.execute(slot.tx, op)
+        except TxAborted as e:
+            self._log(slot, f"ABANDON : {e.reason}", "abort", wake)
+            self._finish(slot, f"abort ({e.reason})")
+            self._wake()
+            return "end"
+        if isinstance(res, Blocked):
+            first = slot.blocked is None
+            slot.blocked = res
+            slot.waited += 1
+            if first:
+                self._wait_counter += 1
+                slot.wait_since = self._wait_counter
+                holders = ", ".join(sorted(self.engine.txs[t].name for t in res.waits_for))
+                self._log(slot, f"{_short(op)} attend {holders}", "wait", wake)
+            cycle = self._deadlock(slot.name)
+            if cycle:
+                # victime : la transaction la plus jeune du cycle (garantit la progression)
+                victim = max((self.slots[n] for n in cycle), key=lambda s: s.tx.txid)
+                self.engine.abort(victim.tx)
+                self._log(victim, "ABANDON : interblocage", "abort", wake)
+                self._finish(victim, "abort (interblocage)")
+                self._wake()
+                return "end" if victim is slot else ("blocked" if slot.blocked else "ok")
+            return "blocked"
+        slot.blocked = None
+        kind = op[0]
+        self._log(slot, _fmt(op, res), {"read": "read", "read_for_update": "read", "scan": "read",
+                                        "commit": "commit"}.get(kind, "write"), wake)
+        if kind == "commit":
+            self._finish(slot, "commit")
+            self._wake()
+            return "end"
+        if kind in ("read", "read_for_update", "scan", "incr"):
+            slot.reads.append(res)
+        try:
+            slot.pending = slot.gen.send(res)
+        except StopIteration:
+            slot.pending = _COMMIT
+        return "ok"
+
+    def _wake(self):
+        progress = True
+        while progress:
+            progress = False
+            waiting = sorted((s for s in self.slots.values()
+                              if s.blocked is not None and not s.done and s.tx is not None),
+                             key=lambda s: s.wait_since)
+            for s in waiting:
+                if s.blocked is not None and not s.done and s.tx is not None:
+                    r = self._exec(s, wake=True)
+                    if r != "blocked":
+                        progress = True
+                        break
+
+    def step(self, name: str) -> str:
+        """Fait avancer `name` d'une opération. Renvoie 'ok', 'blocked', 'end' ou 'done'."""
+        self.step_no += 1
+        slot = self.slots[name]
+        if slot.done:
+            return "done"
+        if slot.tx is None:
+            self._start(slot)
+        if slot.blocked is not None:
+            r = self._exec(slot)
+            return r
+        return self._exec(slot)
+
+    def runnable(self) -> list[str]:
+        return [n for n, s in self.slots.items() if not s.done and s.blocked is None]
+
+    def active(self) -> list[str]:
+        return [n for n, s in self.slots.items() if not s.done]
+
+    def run(self, schedule=None, max_steps: int = 10_000) -> RunResult:
+        for name in (schedule or []):
+            self.step(name)
+        n = 0
+        while self.active() and n < max_steps:
+            r = self.runnable()
+            if not r:  # tout le monde attend sans cycle détecté : ne devrait pas arriver
+                raise RuntimeError("blocage sans interblocage détecté")
+            for name in r:
+                self.step(name)
+            n += 1
+        return self.result()
+
+    def result(self) -> RunResult:
+        return RunResult(self.engine, pd.DataFrame(self.events),
+                         {n: s.outcome for n, s in self.slots.items()},
+                         {n: s.reads for n, s in self.slots.items()},
+                         {n: s.attempts for n, s in self.slots.items()})
