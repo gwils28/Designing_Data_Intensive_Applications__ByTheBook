@@ -795,3 +795,105 @@ class Scheduler:
                          {n: s.outcome for n, s in self.slots.items()},
                          {n: s.reads for n, s in self.slots.items()},
                          {n: s.attempts for n, s in self.slots.items()})
+
+
+def run(initial: dict, programs: dict, schedule=None, level: str = "read_committed",
+        retries: int = 0, detect_lost_updates: bool = True, levels: dict | None = None) -> RunResult:
+    """Exécute `programs` ({nom: fonction génératrice}) sur une base initialisée à `initial`.
+
+    schedule : suite de noms (ex. "ABAB" ou ["A", "B"]) donnant l'ordre des pas ; une fois
+    épuisée, les transactions restantes avancent à tour de rôle. levels : niveau propre à
+    certaines transactions (sinon `level`)."""
+    eng = Engine(initial, level=level, detect_lost_updates=detect_lost_updates)
+    sch = Scheduler(eng, retries=retries)
+    for name, prog in programs.items():
+        sch.add(name, prog, (levels or {}).get(name))
+    return sch.run(list(schedule) if schedule is not None else None)
+
+
+# --- analyse ------------------------------------------------------------------------
+
+def serial_results(initial: dict, programs: dict, names=None) -> list:
+    """Résultats de toutes les exécutions en série : [(ordre, état final, lectures)]."""
+    names = list(names or programs)
+    out = []
+    for order in itertools.permutations(names):
+        sched = []
+        for n in order:
+            sched += [n] * 200
+        res = run(initial, {n: programs[n] for n in order}, sched, level="read_committed")
+        out.append((order, res.final, {n: res.reads[n] for n in order}))
+    return out
+
+
+def is_serializable(res: RunResult, initial: dict, programs: dict):
+    """Renvoie un ordre série équivalent (état final et valeurs lues identiques pour les
+    transactions validées), ou None si l'exécution n'est équivalente à aucun ordre série."""
+    names = res.committed
+    for order, final, reads in serial_results(initial, programs, names):
+        if final == res.final and all(reads[n] == res.reads[n] for n in names):
+            return order
+    return None
+
+
+def precedence_graph(res: RunResult):
+    """Graphe de précédence (conflits) entre transactions validées.
+
+    Arcs : wr (T lit une version écrite par U : U -> T), ww (U écrit une version que T
+    remplace : U -> T), rw (T lit une version que U remplace ensuite : T -> U, dite
+    anti-dépendance). Une exécution est sérialisable par conflits ssi le graphe est
+    acyclique. Renvoie un networkx.DiGraph (attribut 'kind' sur les arcs).
+    """
+    import networkx as nx
+
+    eng = res.engine
+    committed = {t.txid: t for t in eng.txs.values() if t.status == COMMITTED}
+    order = {}   # clé -> liste des xmin validés dans l'ordre des versions
+    for k, vs in eng.versions.items():
+        order[k] = [v.xmin for v in vs if eng.status[v.xmin] == COMMITTED]
+    g = nx.DiGraph()
+    g.add_nodes_from(t.name for t in committed.values())
+
+    def add(a, b, kind, key):
+        if a == b or a not in committed or b not in committed:
+            return
+        u, v = committed[a].name, committed[b].name
+        if g.has_edge(u, v):
+            g[u][v]["kind"] = ", ".join(sorted(set(g[u][v]["kind"].split(", ")) | {kind}))
+            g[u][v]["keys"].add(key)
+        else:
+            g.add_edge(u, v, kind=kind, keys={key})
+
+    def after(key, xmin):
+        seq = order.get(key, [])
+        if xmin is None:
+            return seq
+        return seq[seq.index(xmin) + 1:] if xmin in seq else []
+
+    for t in committed.values():
+        for item in t.trace:
+            if item[0] == "r":
+                _, key, xmin = item
+                if xmin is not None:
+                    add(xmin, t.txid, "wr", key)
+                for later in after(key, xmin):
+                    add(t.txid, later, "rw", key)
+            elif item[0] == "w":
+                _, key, _ = item
+                seq = order.get(key, [])
+                if t.txid in seq:
+                    i = seq.index(t.txid)
+                    if i > 0:
+                        add(seq[i - 1], t.txid, "ww", key)
+            elif item[0] == "scan":
+                _, pred, seen = item
+                for key, xmin in seen.items():
+                    vs = {v.xmin: v.value for v in eng.versions.get(key, [])}
+                    if xmin is not None and _match(pred, key, vs.get(xmin)):
+                        add(xmin, t.txid, "wr", key)
+                    old = vs.get(xmin) if xmin is not None else None
+                    for later in after(key, xmin):
+                        if _match(pred, key, old) or _match(pred, key, vs.get(later)):
+                            add(t.txid, later, "rw", key)
+                        old = vs.get(later)
+    return g
