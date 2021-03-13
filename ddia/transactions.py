@@ -979,3 +979,146 @@ def plot_history(res: RunResult, title: str | None = None, subtitle: str | None 
 
 
 # --- charge aléatoire ---------------------------------------------------------------
+
+def simulate_load(make_program: Callable, n_tx: int, level: str, concurrency: int = 4,
+                  seed: int = 0, initial: dict | None = None, max_ticks: int = 100_000,
+                  detect_lost_updates: bool = True) -> dict:
+    """Charge synthétique : `n_tx` transactions `make_program(rng, i)` dont au plus
+    `concurrency` sont actives en même temps. À chaque tic, chaque transaction non bloquée
+    exécute une opération (ordre aléatoire). Les transactions abandonnées sont réessayées
+    jusqu'à validation. Renvoie tics, débit (validations par tic), abandons, interblocages,
+    tics d'attente et l'état final."""
+    rng = random.Random(seed)
+    eng = Engine(dict(initial or {}), level=level, detect_lost_updates=detect_lost_updates)
+    sch = Scheduler(eng, retries=10_000)
+    queue = [f"T{i}" for i in range(n_tx)]
+    progs = {f"T{i}": make_program(rng, i) for i in range(n_tx)}
+    ticks = 0
+    while (queue or sch.active()) and ticks < max_ticks:
+        while queue and len(sch.active()) < concurrency:
+            name = queue.pop(0)
+            sch.add(name, progs[name])
+        r = sch.runnable()
+        rng.shuffle(r)
+        for name in r:
+            if not sch.slots[name].done and sch.slots[name].blocked is None:
+                sch.step(name)
+        ticks += 1
+    ev = pd.DataFrame(sch.events)
+    aborts = ev[ev["type"] == "abort"] if len(ev) else ev
+    return dict(niveau=level, tics=ticks, débit=n_tx / ticks if ticks else 0.0,
+                abandons=len(aborts),
+                interblocages=int(aborts["op"].str.contains("interblocage").sum()) if len(aborts) else 0,
+                attentes=sum(s.waited for s in sch.slots.values()),
+                tentatives=sum(s.attempts for s in sch.slots.values()),
+                final=eng.snapshot_state())
+
+
+# =====================================================================================
+# 4. Validation à deux phases (2PC) sur le simulateur ddia.sim
+# =====================================================================================
+
+class _EpochNode(Node):
+    """Nœud dont les minuteries armées avant une panne ne se déclenchent pas après."""
+
+    def __init__(self, name):
+        super().__init__(name)
+        self.epoch = 0
+        self.durable: list = []          # journal sur disque (survit aux pannes)
+
+    def timer(self, delay, fn, *args):
+        e = self.epoch
+
+        def fire():
+            if self.epoch == e:
+                fn(*args)
+        self.set_timer(delay, fire)
+
+    def on_crash(self):
+        self.epoch += 1
+        self.record("panne")
+
+
+class Participant2PC(_EpochNode):
+    """Participant : exécute sa part de la transaction (verrous), vote, applique la décision.
+
+    vote : "yes" ou "no" (ex. violation de contrainte détectée à la préparation).
+    prepare_time : durée d'écriture durable des données avant le vote (fsync).
+    query_interval : en doute, intervalle entre deux demandes de statut au coordinateur.
+    """
+
+    def __init__(self, name, coordinator="coord", vote="yes", prepare_time=0.4,
+                 query_interval=2.0, unilateral_timeout=None):
+        super().__init__(name)
+        self.coordinator = coordinator
+        self.vote = vote
+        self.prepare_time = prepare_time
+        self.query_interval = query_interval
+        self.unilateral_timeout = unilateral_timeout
+        self.state = "idle"
+        self.lock_from = None
+        self.lock_until = None
+        self.prepared_at = None
+        self.decided_at = None
+        self.outcome = None
+
+    def _decide(self, d):
+        if self.outcome is not None:
+            return
+        self.durable.append(d)
+        self.outcome = d
+        self.state = d
+        self.decided_at = self.now
+        self.lock_until = self.now
+        self.record(d)
+
+    def on_message(self, src, msg):
+        kind = msg[0]
+        if kind == "begin":
+            self.state = "working"
+            self.lock_from = self.now
+            if self.unilateral_timeout is not None:
+                self.timer(self.unilateral_timeout, self._timeout_before_vote)
+        elif kind == "prepare":
+            if self.outcome == "abort":
+                self.send(src, ("vote", "no"))
+            elif self.vote == "no":
+                self._decide("abort")
+                self.send(src, ("vote", "no"))
+            elif self.state == "prepared":
+                self.send(src, ("vote", "yes"))
+            else:
+                self.timer(self.prepare_time, self._prepared, src)
+        elif kind in ("commit", "abort"):
+            self._decide(kind)
+            self.send(src, ("ack", kind))
+        elif kind == "status":
+            if msg[1] in ("commit", "abort"):
+                self._decide(msg[1])
+
+    def _prepared(self, src):
+        self.durable.append("prepared")
+        self.state = "prepared"
+        self.prepared_at = self.now
+        self.record("prêt (vote oui)")
+        self.send(src, ("vote", "yes"))
+        self.timer(self.query_interval * 2, self._query)
+
+    def _timeout_before_vote(self):
+        if self.state == "working":
+            self._decide("abort")
+
+    def _query(self):
+        if self.state == "prepared" and self.outcome is None:
+            self.send(self.coordinator, ("status?",))
+            self.timer(self.query_interval, self._query)
+
+    def on_recover(self):
+        self.record("redémarrage")
+        if "commit" in self.durable or "abort" in self.durable:
+            return
+        if "prepared" in self.durable:      # en doute : on garde les verrous
+            self.state = "prepared"
+            self._query()
+        else:                               # pas encore voté : abandon unilatéral
+            self._decide("abort")
