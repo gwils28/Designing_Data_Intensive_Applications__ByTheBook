@@ -897,3 +897,85 @@ def precedence_graph(res: RunResult):
                             add(t.txid, later, "rw", key)
                         old = vs.get(later)
     return g
+
+
+def plot_precedence(g, ax=None, title: str | None = None, pos=None):
+    """Dessine un graphe de précédence (arcs étiquetés wr / ww / rw ; arcs d'un cycle en
+    rose). Renvoie l'axe."""
+    import matplotlib.pyplot as plt
+    import networkx as nx
+    from matplotlib.patches import FancyArrowPatch
+
+    from .plotting import INDIGO, LIGHT, ROSE, SLATE
+
+    if ax is None:
+        _, ax = plt.subplots(figsize=(4.5, 3.2))
+    pos = pos or nx.circular_layout(g)
+    in_cycle = set()
+    for cyc in nx.simple_cycles(g):
+        for i in range(len(cyc)):
+            in_cycle.add((cyc[i], cyc[(i + 1) % len(cyc)]))
+    for u, v, data in g.edges(data=True):
+        c = ROSE if (u, v) in in_cycle else SLATE
+        rad = 0.25 if g.has_edge(v, u) else 0.0
+        ax.add_patch(FancyArrowPatch(pos[u], pos[v], arrowstyle="-|>", mutation_scale=16, color=c,
+                                     lw=1.8, connectionstyle=f"arc3,rad={rad}", shrinkA=22, shrinkB=22))
+        mx, my = (pos[u][0] + pos[v][0]) / 2, (pos[u][1] + pos[v][1]) / 2
+        dx, dy = pos[v][0] - pos[u][0], pos[v][1] - pos[u][1]
+        mx, my = mx + dy * rad * 0.5, my - dx * rad * 0.5
+        keys = ",".join(sorted(map(str, data.get("keys", []))))
+        ax.text(mx, my, f"{data['kind']} ({keys})", fontsize=8, color=c, ha="center", va="center",
+                bbox=dict(boxstyle="round,pad=0.15", fc="white", ec="none", alpha=0.9))
+    for n, (x, y) in pos.items():
+        ax.scatter([x], [y], s=900, color=LIGHT[INDIGO], edgecolor=INDIGO, lw=1.8, zorder=3)
+        ax.text(x, y, n, ha="center", va="center", fontsize=10, fontweight="bold", color=SLATE, zorder=4)
+    ax.set_xlim(-1.5, 1.5)
+    ax.set_ylim(-1.4, 1.4)
+    ax.set_aspect("equal")
+    ax.axis("off")
+    if title:
+        ax.set_title(title, fontsize=10.5)
+    return ax
+
+
+def plot_history(res: RunResult, title: str | None = None, subtitle: str | None = None,
+                 width: float = 11, names=None, t_max=None):
+    """Frise d'une exécution : une ligne par transaction, un pas par colonne.
+    Lectures en sarcelle, écritures en ambre, validations en vert, attentes en gris,
+    abandons en rose."""
+    from .plotting import AMBER, GRAY, GREEN, ROSE, TEAL
+    from .timelines import SpaceTime
+
+    h = res.history
+    names = names or list(res.outcomes)
+    t_max = t_max or (h["pas"].max() + 1 if len(h) else 2)
+    st = SpaceTime(names, t_max=t_max, title=None, subtitle=subtitle, width=width,
+                   time_label="pas d'exécution")
+    if title:
+        st.ax.set_title(title, pad=18 if subtitle else 6)
+    colors = {"read": TEAL, "write": AMBER, "commit": GREEN, "wait": GRAY, "abort": ROSE}
+    count: dict = {}
+    for _, e in h.iterrows():
+        if e["tx"] not in names:
+            continue
+        key = (e["tx"], e["pas"])
+        k = count.get(key, 0)
+        count[key] = k + 1
+        t = e["pas"] + 0.22 * k
+        c = colors[e["type"]]
+        if e["type"] == "abort":
+            st.event(e["tx"], t, "", kind="crash")
+            st.note(t, e["tx"], e["op"].replace("ABANDON : ", "abandon : "), dy=-0.33,
+                    color=ROSE, fontsize=7.5)
+        elif e["type"] == "wait":
+            st.span(e["tx"], t - 0.35, t + 0.35, "", color=GRAY, alpha=0.35)
+            st.note(t, e["tx"], e["op"], dy=0.3, color="#64748B", fontsize=7.5)
+        else:
+            label = e["op"] + (" (réveil)" if e["réveil"] else "")
+            st.op(e["tx"], t - 0.32, t + 0.32, "", color=c)
+            st.note(t, e["tx"], label, dy=0.3 if (e["pas"] % 2 == 0 or len(names) == 1) else -0.32,
+                    color=c, fontsize=7.5)
+    return st
+
+
+# --- charge aléatoire ---------------------------------------------------------------
