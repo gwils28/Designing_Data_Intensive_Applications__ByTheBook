@@ -1122,3 +1122,106 @@ class Participant2PC(_EpochNode):
             self._query()
         else:                               # pas encore voté : abandon unilatéral
             self._decide("abort")
+
+
+class Coordinator2PC(_EpochNode):
+    """Coordinateur 2PC (ou validation naïve en une phase si protocol="1pc").
+
+    work_time : durée de la phase d'exécution (lectures, écritures) avant la validation ;
+    vote_timeout : délai d'attente des votes ; log_time : écriture durable de la décision
+    (le point de validation) ; retry_interval : renvoi de la décision tant que tous les
+    participants n'ont pas acquitté.
+    """
+
+    def __init__(self, name, participants, start_at=0.5, work_time=1.5, vote_timeout=4.0,
+                 log_time=0.4, retry_interval=2.0, protocol="2pc"):
+        super().__init__(name)
+        self.participants = list(participants)
+        self.start_at, self.work_time = start_at, work_time
+        self.vote_timeout, self.log_time = vote_timeout, log_time
+        self.retry_interval = retry_interval
+        self.protocol = protocol
+        self.votes: dict = {}
+        self.acks: set = set()
+        self.decision = None
+        self.collecting = False
+        self.decided_at = None
+
+    def on_start(self):
+        self.timer(self.start_at, self._begin)
+
+    def _begin(self):
+        for p in self.participants:
+            self.send(p, ("begin",))
+        self.timer(self.work_time, self._commit_request)
+
+    def _commit_request(self):
+        if self.protocol == "1pc":
+            self.durable.append("commit")
+            self.decision = "commit"
+            self.decided_at = self.now
+            for p in self.participants:
+                self.send(p, ("commit1",))
+            return
+        self.collecting = True
+        self.record("prepare")
+        for p in self.participants:
+            self.send(p, ("prepare",))
+        self.timer(self.vote_timeout, self._vote_timeout)
+
+    def _vote_timeout(self):
+        if self.decision is None and self.collecting:
+            self.record("délai des votes dépassé")
+            self._decide("abort")
+
+    def _decide(self, d):
+        self.collecting = False
+        self.decision = d
+        self.timer(self.log_time, self._logged, d)
+
+    def _logged(self, d):
+        self.durable.append(d)        # point de validation
+        self.decided_at = self.now
+        self.record(f"décision {d} journalisée")
+        self._broadcast()
+
+    def _broadcast(self):
+        if self.decision not in self.durable:
+            return
+        missing = [p for p in self.participants if p not in self.acks]
+        for p in missing:
+            self.send(p, (self.decision,))
+        if missing:
+            self.timer(self.retry_interval, self._broadcast)
+
+    def on_message(self, src, msg):
+        kind = msg[0]
+        if kind == "vote" and self.collecting:
+            self.votes[src] = msg[1]
+            if msg[1] == "no":
+                self._decide("abort")
+            elif len(self.votes) == len(self.participants) and all(v == "yes" for v in self.votes.values()):
+                self._decide("commit")
+        elif kind == "ack":
+            self.acks.add(src)
+        elif kind == "status?":
+            logged = [d for d in self.durable if d in ("commit", "abort")]
+            if logged:
+                self.send(src, ("status", logged[-1]))
+            elif not self.collecting and self.decision is None and self.epoch > 0:
+                self.send(src, ("status", "abort"))     # abandon présumé après redémarrage
+
+    def on_recover(self):
+        self.record("redémarrage")
+        self.collecting = False
+        self.votes = {}
+        logged = [d for d in self.durable if d in ("commit", "abort")]
+        if logged:
+            self.decision = logged[-1]
+            self._broadcast()
+        else:
+            # aucune décision sur disque : abandon présumé
+            self.decision = "abort"
+            self.durable.append("abort")
+            self.decided_at = self.now
+            self._broadcast()
