@@ -1225,3 +1225,61 @@ class Coordinator2PC(_EpochNode):
             self.durable.append("abort")
             self.decided_at = self.now
             self._broadcast()
+
+
+class _OnePhaseParticipant(Participant2PC):
+    def on_message(self, src, msg):
+        if msg[0] == "commit1":
+            self._decide("abort" if self.vote == "no" else "commit")
+            self.send(src, ("ack", self.outcome))
+        else:
+            super().on_message(src, msg)
+
+
+@dataclass
+class TwoPCRun:
+    net: Network
+    coord: Coordinator2PC
+    parts: list
+    summary: pd.DataFrame
+    atomic: bool
+    t_max: float
+
+
+def run_2pc(n_participants: int = 2, votes=None, protocol: str = "2pc", crash=None,
+            latency=(0.3, 0.9), seed: int = 0, t_max: float = 30.0, drop: float = 0.0,
+            participant_kw: dict | None = None, cuts: dict | None = None, **coord_kw) -> TwoPCRun:
+    """Simule une transaction distribuée validée par 2PC (ou en une phase, protocol="1pc").
+
+    votes : liste de "yes"/"no" (un par participant).
+    crash : {nom: (t_panne, t_redémarrage ou None)} ; les noms sont "coord", "db1", "db2"...
+    cuts : {(source, destination): (t0, t1)} coupe un sens d'un lien entre t0 et t1.
+    Renvoie un TwoPCRun : réseau (trace), nœuds, tableau de synthèse par participant
+    (issue, durée de détention des verrous, durée en doute) et booléen `atomic`
+    (aucun mélange de commit et d'abort).
+    """
+    votes = votes or ["yes"] * n_participants
+    names = [f"db{i + 1}" for i in range(n_participants)]
+    net = Network(seed=seed, latency=latency, drop=drop)
+    coord = net.add(Coordinator2PC("coord", names, protocol=protocol, **coord_kw))
+    cls = _OnePhaseParticipant if protocol == "1pc" else Participant2PC
+    parts = [net.add(cls(n, vote=v, **(participant_kw or {}))) for n, v in zip(names, votes)]
+    for name, (t0, t1) in (crash or {}).items():
+        net.at(t0, net.crash, name)
+        if t1 is not None:
+            net.at(t1, net.recover, name)
+    for (a, b), (t0, t1) in (cuts or {}).items():
+        net.at(t0, net.block, a, b)
+        net.at(t1, net._blocked.discard, (a, b))
+    net.run(until=t_max)
+    rows = []
+    for p in parts:
+        end = p.lock_until if p.lock_until is not None else t_max
+        rows.append(dict(participant=p.name, vote=p.vote, issue=p.outcome or "en doute",
+                         verrous_de=p.lock_from, verrous_jusqu_à=p.lock_until,
+                         durée_verrous=None if p.lock_from is None else end - p.lock_from,
+                         durée_en_doute=None if p.prepared_at is None else
+                         (p.decided_at if p.decided_at is not None else t_max) - p.prepared_at))
+    df = pd.DataFrame(rows)
+    decided = {o for o in df["issue"] if o != "en doute"}
+    return TwoPCRun(net, coord, parts, df, len(decided) <= 1, t_max)
