@@ -100,3 +100,96 @@ def test_lecture_sale():
     rc = run({"x": 2, "y": 2}, {"W": writer, "L": reader}, "WLLW", level="read_committed")
     assert ru.reads["L"] == [3, 2]          # incohérent : lecture sale
     assert rc.reads["L"] == [2, 2]
+
+
+def test_ecriture_sale_sans_verrous():
+    def buy(who):
+        def prog():
+            yield W("listing", who)
+            yield W("invoice", who)
+        return prog
+    r = run({"listing": None, "invoice": None}, {"A": buy("A"), "B": buy("B")}, "ABBA", level="none")
+    assert r.final["listing"] != r.final["invoice"]
+    rc = run({"listing": None, "invoice": None}, {"A": buy("A"), "B": buy("B")}, "ABBA", level="read_committed")
+    assert rc.final["listing"] == rc.final["invoice"]
+
+
+def test_read_skew_et_snapshot():
+    def transfer():
+        a = yield R("a1")
+        yield W("a1", a + 100)
+        b = yield R("a2")
+        yield W("a2", b - 100)
+
+    def audit():
+        x = yield R("a1")
+        y = yield R("a2")
+        return x + y
+    init = {"a1": 500, "a2": 500}
+    rc = run(init, {"L": audit, "T": transfer}, "LTTTTTL", level="read_committed")
+    si = run(init, {"L": audit, "T": transfer}, "LTTTTTL", level="snapshot")
+    assert sum(rc.reads["L"]) == 900
+    assert sum(si.reads["L"]) == 1000
+
+
+def test_write_skew_medecins():
+    progs = {"A": off_call("alice"), "B": off_call("bob")}
+    si = run(DOCS, progs, "ABABAB", level="snapshot")
+    assert si.final == {"alice": False, "bob": False}
+    assert is_serializable(si, DOCS, progs) is None
+    g = precedence_graph(si)
+    assert not nx.is_directed_acyclic_graph(g)
+    for lvl in ("serializable_ssi", "serializable_2pl"):
+        r = run(DOCS, progs, "ABABAB", level=lvl)
+        assert list(r.final.values()).count(True) == 1
+        assert is_serializable(r, DOCS, progs) is not None
+    fu = run(DOCS, {"A": off_call("alice", True), "B": off_call("bob", True)}, "ABABAB", level="read_committed")
+    assert list(fu.final.values()).count(True) == 1
+
+
+def test_fantome_reservation():
+    def book(user):
+        def prog():
+            r = yield S(lambda k, v: k.startswith("resa:") and v["salle"] == 1, "salle 1 ?")
+            if not r:
+                yield W(f"resa:{user}", {"salle": 1, "user": user})
+        return prog
+    progs = {"A": book("a"), "B": book("b")}
+    si = run({}, progs, "ABABAB", level="snapshot")
+    assert len(si.final) == 2               # double réservation
+    for lvl in ("serializable_ssi", "serializable_2pl"):
+        r = run({}, progs, "ABABAB", level=lvl, retries=1)
+        assert len(r.final) == 1
+    fu = run({}, {"A": book("a"), "B": book("b")}, "ABABAB", level="read_committed")
+    assert len(fu.final) == 2
+
+
+def test_ssi_lecture_seule_jamais_abandonnee():
+    def ro():
+        yield R("x")
+        yield R("y")
+
+    def wr():
+        yield W("x", 5)
+    r = run({"x": 1, "y": 1}, {"L": ro, "E": wr}, "LEEL", level="serializable_ssi")
+    assert r.committed == ["L", "E"]
+
+
+def test_mvcc_versions_et_vacuum():
+    eng = Engine({"x": 1}, level="snapshot")
+    t1 = eng.begin("lecteur")
+    assert eng.read(t1, "x") == 1
+    for i in range(3):
+        t = eng.begin()
+        eng.write(t, "x", 10 + i)
+        eng.commit(t)
+    assert eng.read(t1, "x") == 1           # l'instantané ne bouge pas
+    assert len(eng.versions["x"]) == 4
+    assert eng.vacuum() == 2                # garde la version de t1 et la dernière
+    eng.commit(t1)
+    assert eng.vacuum() == 1
+    assert eng.snapshot_state() == {"x": 12}
+    t = eng.begin()
+    eng.write(t, "x", DELETED)
+    eng.commit(t)
+    assert eng.snapshot_state() == {}
