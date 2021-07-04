@@ -193,3 +193,47 @@ def test_mvcc_versions_et_vacuum():
     eng.write(t, "x", DELETED)
     eng.commit(t)
     assert eng.snapshot_state() == {}
+
+
+def test_simulate_load_correct_si_serialisable():
+    def make(rng, i):
+        keys = rng.sample(["a", "b", "c"], 2)
+
+        def prog():
+            for k in keys:
+                v = yield R(k)
+                yield W(k, v + 1)
+        return prog
+    init = {"a": 0, "b": 0, "c": 0}
+    for lvl in ("serializable_2pl", "serializable_ssi", "snapshot"):
+        out = simulate_load(make, 30, lvl, concurrency=4, seed=1, initial=init)
+        assert sum(out["final"].values()) == 60
+    rc = simulate_load(make, 30, "read_committed", concurrency=4, seed=1, initial=init)
+    assert sum(rc["final"].values()) < 60
+
+
+# --- 2PC ------------------------------------------------------------------------------
+
+def test_2pc_succes_et_abandon():
+    ok = run_2pc()
+    assert ok.atomic and set(ok.summary["issue"]) == {"commit"}
+    no = run_2pc(votes=["yes", "no"])
+    assert no.atomic and set(no.summary["issue"]) == {"abort"}
+
+
+def test_1pc_non_atomique():
+    r = run_2pc(protocol="1pc", votes=["yes", "no"])
+    assert not r.atomic
+
+
+@pytest.mark.parametrize("t", [0.2, 1.0, 2.2, 2.9, 3.6, 4.6, 5.0, 6.0])
+def test_2pc_atomique_quelle_que_soit_la_panne(t):
+    r = run_2pc(crash={"coord": (t, t + 8)}, t_max=40)
+    assert r.atomic
+    assert "en doute" not in set(r.summary["issue"])
+
+
+def test_2pc_bloque_sans_coordinateur():
+    r = run_2pc(crash={"coord": (2.9, None)}, t_max=30)
+    assert set(r.summary["issue"]) == {"en doute"}
+    assert r.summary["durée_en_doute"].min() > 20
