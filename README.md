@@ -73,7 +73,7 @@ Lancer les tests : `pytest tests/`.
 | | *Partie II - Données distribuées* | |
 | 5 | [Réplication](notebooks/ch05_replication) | ✅ |
 | 6 | [Partitionnement](notebooks/ch06_partitionnement) | ✅ |
-| 7 | Transactions | 🚧 |
+| 7 | [Transactions](notebooks/ch07_transactions) | ✅ |
 | 8 | Les problèmes des systèmes distribués | ⬜ |
 | 9 | Cohérence et consensus | ⬜ |
 | | *Partie III - Données dérivées* | |
