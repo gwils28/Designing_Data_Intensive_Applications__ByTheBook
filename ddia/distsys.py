@@ -231,3 +231,79 @@ def switch_port_sim(n_inputs: int = 3, load: float = 0.8, buffer: int = 64,
             head = 0
     return {"waits": np.asarray(waits), "drop_rate": dropped / max(sent, 1),
             "queue": qtrace, "offered": sent / slots}
+
+
+def fifo_departures(arrivals: np.ndarray, service: np.ndarray) -> np.ndarray:
+    """Instants de fin de service d'une file FIFO à un serveur (récurrence de Lindley)."""
+    out = np.empty_like(arrivals, dtype=float)
+    free = -np.inf
+    for i, (a, s) in enumerate(zip(arrivals, service)):
+        start = a if a > free else free
+        free = start + s
+        out[i] = free
+    return out
+
+
+def circuit_vs_packet(n_users: int = 10, load: float = 0.3, n_jobs: int = 20_000,
+                      capacity: float = 1.0, mean_size: float = 1.0,
+                      seed: int = 0) -> Dict[str, np.ndarray]:
+    """Transferts de fichiers en rafales : circuits statiques contre partage dynamique.
+
+    Chaque utilisateur émet des transferts (tailles exponentielles) selon un processus de
+    Poisson, la charge totale valant `load` de la capacité du lien.
+
+    - circuits : le lien est découpé en `n_users` circuits de débit capacity / n_users,
+      chaque utilisateur a sa propre file ;
+    - paquets : une seule file FIFO au débit `capacity` (partage dynamique).
+
+    Renvoie les durées de transfert (attente + émission) dans les deux cas.
+    """
+    rng = np.random.default_rng(seed)
+    lam_user = load * capacity / mean_size / n_users
+    users = rng.integers(0, n_users, n_jobs)
+    arrivals = np.cumsum(rng.exponential(1 / (lam_user * n_users), n_jobs))
+    sizes = rng.exponential(mean_size, n_jobs)
+    packet = fifo_departures(arrivals, sizes / capacity) - arrivals
+    circuit = np.empty(n_jobs)
+    for u in range(n_users):
+        m = users == u
+        circuit[m] = fifo_departures(arrivals[m], sizes[m] / (capacity / n_users)) - arrivals[m]
+    return {"circuit": circuit, "paquets": packet, "sizes": sizes}
+
+
+def voice_over_packets(load_cross: float, n_frames: int = 20_000, frame_size: float = 0.05,
+                       seed: int = 0) -> np.ndarray:
+    """Délai subi par un flux audio régulier qui partage une file avec du trafic en rafales.
+
+    Le flux audio émet une trame de taille `frame_size` à chaque unité de temps ; le trafic
+    concurrent (Poisson, tailles exponentielles de moyenne 1) occupe `load_cross` du lien.
+    Sur un circuit réservé, le délai serait constant (frame_size).
+    """
+    rng = np.random.default_rng(seed)
+    t_voice = np.arange(n_frames, dtype=float)
+    n_cross = rng.poisson(load_cross * n_frames)
+    t_cross = np.sort(rng.uniform(0, n_frames, n_cross))
+    arr = np.concatenate([t_voice, t_cross])
+    svc = np.concatenate([np.full(n_frames, frame_size), rng.exponential(1.0, n_cross)])
+    is_voice = np.concatenate([np.ones(n_frames, bool), np.zeros(n_cross, bool)])
+    order = np.argsort(arr, kind="stable")
+    dep = fifo_departures(arr[order], svc[order])
+    delay = dep - arr[order]
+    return delay[is_voice[order]]
+
+
+def drift_error(ppm: float, seconds: float) -> float:
+    """Écart accumulé (en secondes) par une horloge qui dérive de `ppm` pendant `seconds`."""
+    return ppm * 1e-6 * seconds
+
+
+def ntp_offset_delay(t0: float, t1: float, t2: float, t3: float) -> Tuple[float, float]:
+    """Calcul NTP à partir des quatre horodatages d'un échange.
+
+    t0 : émission client (horloge client) ; t1 : réception serveur ; t2 : émission
+    serveur (horloge serveur) ; t3 : réception client (horloge client).
+    Renvoie (décalage estimé serveur - client, délai aller-retour réseau).
+    """
+    offset = ((t1 - t0) + (t2 - t3)) / 2
+    delay = (t3 - t0) - (t2 - t1)
+    return offset, delay
