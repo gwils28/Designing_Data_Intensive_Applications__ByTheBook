@@ -307,3 +307,91 @@ def ntp_offset_delay(t0: float, t1: float, t2: float, t3: float) -> Tuple[float,
     offset = ((t1 - t0) + (t2 - t3)) / 2
     delay = (t3 - t0) - (t2 - t1)
     return offset, delay
+
+
+def ntp_exchange(true_offset: float, d_out: float, d_back: float, t0: float = 0.0,
+                 server_time: float = 0.0) -> Tuple[float, float, float]:
+    """Simule un échange NTP ; renvoie (décalage estimé, délai, erreur d'estimation).
+
+    true_offset = horloge serveur - horloge client. L'erreur vaut (d_out - d_back) / 2 :
+    elle est nulle si le réseau est symétrique et bornée par délai / 2.
+    """
+    t1 = t0 + d_out + true_offset
+    t2 = t1 + server_time
+    t3 = t2 - true_offset + d_back
+    off, delay = ntp_offset_delay(t0, t1, t2, t3)
+    return off, delay, off - true_offset
+
+
+def marzullo(intervals: Sequence[Tuple[float, float]]) -> Tuple[int, float, float]:
+    """Algorithme de Marzullo : le plus petit intervalle compatible avec le maximum de sources.
+
+    intervals : liste de (bas, haut) annoncés par chaque source (« l'heure est dans
+    [bas, haut] »). Renvoie (nombre de sources d'accord, bas, haut).
+    """
+    edges = []
+    for lo, hi in intervals:
+        edges.append((lo, -1))      # début : -1 trie avant les fins à égalité
+        edges.append((hi, +1))
+    edges.sort()
+    best = cnt = 0
+    best_lo = best_hi = float("nan")
+    for i, (x, typ) in enumerate(edges):
+        cnt -= typ
+        if cnt > best:
+            best = cnt
+            best_lo = x
+            best_hi = edges[i + 1][0]
+    return best, best_lo, best_hi
+
+
+def smeared_offset(t: np.ndarray, leap_at: float, window: float = 86_400.0) -> np.ndarray:
+    """Écart (s) entre une horloge « lissée » et une horloge qui insère la seconde d'un coup.
+
+    Lissage linéaire sur `window` secondes centrées sur l'instant de la seconde
+    intercalaire (méthode « leap smear »).
+    """
+    t = np.asarray(t, dtype=float)
+    return np.clip((t - (leap_at - window / 2)) / window, 0.0, 1.0)
+
+
+def tod_clock_trace(duration: float = 3600.0, dt: float = 1.0, drift_ppm: float = 200.0,
+                    sync_every: float = 600.0, sync_error_ms: float = 5.0,
+                    step_threshold_ms: float = 128.0, slew_rate: float = 500e-6,
+                    seed: int = 0) -> Dict[str, np.ndarray]:
+    """Trajectoire de l'écart (ms) d'une horloge calendaire synchronisée par NTP.
+
+    Entre deux synchronisations, l'horloge dérive de `drift_ppm`. À chaque
+    synchronisation, NTP estime l'écart (avec une erreur gaussienne d'écart-type
+    `sync_error_ms`) : si |écart| dépasse `step_threshold_ms`, l'horloge est **recalée
+    d'un coup** (elle peut reculer) ; sinon NTP **ralentit ou accélère** l'horloge
+    (« slew ») au plus de `slew_rate` jusqu'à corriger l'écart.
+
+    Renvoie t (s), écart de l'horloge calendaire (ms), indicateur des sauts.
+    """
+    rng = np.random.default_rng(seed)
+    n = int(duration / dt) + 1
+    t = np.arange(n) * dt
+    off = np.empty(n)
+    jumps = np.zeros(n, bool)
+    cur = 0.0
+    pending = 0.0          # correction restant à appliquer par slew (ms)
+    next_sync = sync_every
+    for i in range(n):
+        if i:
+            cur += drift_ppm * 1e-6 * dt * 1e3
+            step = min(abs(pending), slew_rate * dt * 1e3)
+            corr = math.copysign(step, pending) if pending else 0.0
+            cur += corr
+            pending -= corr
+        if t[i] >= next_sync:
+            est = cur + rng.normal(0, sync_error_ms)
+            if abs(est) > step_threshold_ms:
+                cur -= est
+                pending = 0.0
+                jumps[i] = True
+            else:
+                pending = -est
+            next_sync += sync_every
+        off[i] = cur
+    return {"t": t, "offset_ms": off, "jumps": jumps}
