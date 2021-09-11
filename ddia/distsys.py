@@ -395,3 +395,82 @@ def tod_clock_trace(duration: float = 3600.0, dt: float = 1.0, drift_ppm: float 
             next_sync += sync_every
         off[i] = cur
     return {"t": t, "offset_ms": off, "jumps": jumps}
+
+
+def lww_lost_writes(skew: float, n_writes: int = 10_000, mean_gap: float = 1.0,
+                    seed: int = 0, n_nodes: int = 2) -> Dict[str, float]:
+    """Écritures silencieusement perdues par « la dernière écriture gagne » (LWW).
+
+    Des écritures sur une même clé arrivent l'une après l'autre (écarts exponentiels de
+    moyenne `mean_gap`) sur des nœuds tirés au hasard ; chaque nœud horodate avec son
+    horloge, décalée uniformément dans [0, skew]. Une écriture est perdue si une écriture
+    **antérieure** (en temps réel) porte un horodatage plus grand : elle ne deviendra
+    jamais la valeur courante, sans qu'aucune erreur ne soit signalée.
+    """
+    rng = np.random.default_rng(seed)
+    offsets = rng.uniform(0, skew, n_nodes)
+    offsets -= offsets.min()
+    offsets[np.argmax(offsets)] = skew if n_nodes > 1 else 0.0
+    t = np.cumsum(rng.exponential(mean_gap, n_writes))
+    node = rng.integers(0, n_nodes, n_writes)
+    ts = t + offsets[node]
+    prev_max = np.maximum.accumulate(np.concatenate([[-np.inf], ts[:-1]]))
+    lost = ts < prev_max
+    return {"perdues": float(lost.mean()), "n": n_writes, "offsets": offsets}
+
+
+class LWWReplica(Node):
+    """Réplique multi-leader qui résout les conflits par LWW avec son horloge physique.
+
+    Messages : ("set", valeur) ou ("incr",) d'un client ; ("repl", valeur, ts, origine)
+    d'une autre réplique. L'état est (valeur, horodatage).
+    """
+
+    def __init__(self, name: str, peers: Sequence[str], clock: Optional[Clock] = None):
+        super().__init__(name, clock)
+        self.peers = list(peers)
+        self.value = None
+        self.ts = -math.inf
+        self.history: List[Tuple[float, str, object, float, bool]] = []
+
+    def _apply(self, value, ts, origin) -> None:
+        kept = ts > self.ts
+        if kept:
+            self.value, self.ts = value, ts
+        self.history.append((self.now, origin, value, ts, kept))
+
+    def on_message(self, src, msg):
+        kind = msg[0]
+        if kind in ("set", "incr"):
+            value = msg[1] if kind == "set" else (self.value or 0) + 1
+            ts = self.local_time()
+            self._apply(value, ts, self.name)
+            for p in self.peers:
+                self.send(p, ("repl", value, ts, self.name))
+            self.send(src, ("ok", value, ts))
+        elif kind == "repl":
+            self._apply(msg[1], msg[2], msg[3])
+
+
+class TrueTime:
+    """Horloge à intervalle de confiance, à la TrueTime de Spanner.
+
+    L'incertitude vaut `base` juste après une synchronisation puis grandit de
+    `drift_ppm` (borne de dérive supposée) jusqu'à la synchronisation suivante.
+    `true_offset` est l'écart réel (inconnu du nœud) de son horloge, supposé respecter
+    |true_offset| <= incertitude.
+    """
+
+    def __init__(self, base: float = 1e-3, drift_ppm: float = 200.0, sync_every: float = 30.0,
+                 true_offset: float = 0.0):
+        self.base, self.drift, self.sync_every = base, drift_ppm * 1e-6, sync_every
+        self.true_offset = true_offset
+
+    def epsilon(self, t: float) -> float:
+        return self.base + self.drift * (t % self.sync_every)
+
+    def now(self, t: float) -> Tuple[float, float]:
+        """Lecture à l'instant réel t : (au plus tôt, au plus tard)."""
+        reading = t + self.true_offset
+        e = self.epsilon(t)
+        return reading - e, reading + e
