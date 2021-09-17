@@ -474,3 +474,87 @@ class TrueTime:
         reading = t + self.true_offset
         e = self.epsilon(t)
         return reading - e, reading + e
+
+
+def commit_wait_experiment(n_tx: int = 2000, n_nodes: int = 4, eps: float = 4e-3,
+                           gap: float = 2e-3, commit_wait: bool = True,
+                           seed: int = 0) -> Dict[str, float]:
+    """Transactions causales successives sur des nœuds aux horloges décalées.
+
+    Chaque transaction démarre `gap` (en moyenne) après la validation de la précédente, sur
+    un nœud tiré au hasard (elle peut donc avoir lu ses écritures). Elle prend comme
+    horodatage la borne « au plus tard » de son horloge ; avec commit wait, elle attend que
+    la borne « au plus tôt » dépasse cet horodatage avant de valider.
+
+    Renvoie la proportion de paires consécutives dont les horodatages contredisent l'ordre
+    réel, et l'attente moyenne.
+    """
+    rng = np.random.default_rng(seed)
+    offsets = rng.uniform(-eps, eps, n_nodes)
+    t = 0.0
+    prev_ts = -math.inf
+    inversions = 0
+    waits = []
+    for _ in range(n_tx):
+        t += rng.exponential(gap)
+        node = rng.integers(n_nodes)
+        reading = t + offsets[node]
+        s = reading + eps                      # au plus tard
+        if commit_wait:
+            # attendre que reading' - eps > s, avec reading' = t' + offset
+            wait = max(0.0, s - (reading - eps))
+            t += wait
+            waits.append(wait)
+        if s < prev_ts:
+            inversions += 1
+        prev_ts = s
+    return {"inversions": inversions / (n_tx - 1),
+            "attente_moy": float(np.mean(waits)) if waits else 0.0}
+
+
+# =====================================================================================
+# 3. Pauses de processus, baux et jetons de clôture
+# =====================================================================================
+
+
+def gc_pause_samples(n: int, seed: int = 0, young_ms: float = 8.0, full_prob: float = 0.002,
+                     full_scale_s: float = 2.0, full_alpha: float = 1.5) -> np.ndarray:
+    """Durées (s) de pauses d'un processus : petites pauses fréquentes, rares longues pauses.
+
+    Mélange d'une loi exponentielle (collectes de la jeune génération, quelques ms) et,
+    avec probabilité `full_prob`, d'une loi de Pareto (collecte complète, échange de pages,
+    suspension de VM...) de minimum `full_scale_s`.
+    """
+    rng = np.random.default_rng(seed)
+    small = rng.exponential(young_ms / 1e3, n)
+    big = rng.random(n) < full_prob
+    return np.where(big, full_scale_s * (rng.pareto(full_alpha, n) + 1.0), small)
+
+
+def gc_aware_routing(n_nodes: int = 8, n_requests: int = 200_000, gc_period: float = 10.0,
+                     gc_duration: float = 0.25, service: float = 0.005, warn: float = 0.05,
+                     aware: bool = False, seed: int = 0) -> np.ndarray:
+    """Temps de réponse quand des nœuds font périodiquement une pause de ramasse-miettes.
+
+    Chaque nœud s'arrête `gc_duration` toutes les `gc_period` (phases aléatoires). Une
+    requête qui tombe sur un nœud en pause attend la fin de la pause. Si `aware`, le
+    répartiteur évite les nœuds en pause ou qui préviennent d'une pause imminente
+    (fenêtre `warn`), à la manière du livre (traiter la collecte comme une courte panne
+    planifiée). Sans file d'attente : on isole l'effet des pauses.
+    """
+    rng = np.random.default_rng(seed)
+    phase = rng.uniform(0, gc_period, n_nodes)
+    t = np.sort(rng.uniform(0, gc_period * 100, n_requests))
+    out = np.empty(n_requests)
+    for i, ti in enumerate(t):
+        pos = (ti - phase) % gc_period          # temps depuis le début de la dernière pause
+        in_gc = pos < gc_duration
+        soon = pos > gc_period - warn
+        if aware:
+            ok = np.flatnonzero(~in_gc & ~soon)
+            node = ok[rng.integers(ok.size)] if ok.size else rng.integers(n_nodes)
+        else:
+            node = rng.integers(n_nodes)
+        wait = gc_duration - pos[node] if in_gc[node] else 0.0
+        out[i] = service + wait
+    return out
