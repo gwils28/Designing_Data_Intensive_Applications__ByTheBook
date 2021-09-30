@@ -558,3 +558,90 @@ def gc_aware_routing(n_nodes: int = 8, n_requests: int = 200_000, gc_period: flo
         wait = gc_duration - pos[node] if in_gc[node] else 0.0
         out[i] = service + wait
     return out
+
+
+@dataclass
+class Grant:
+    t: float
+    token: int
+    client: str
+
+
+class LockService(Node):
+    """Service de verrous à baux : accorde un bail de durée `lease` et un jeton croissant.
+
+    Messages : ("acquire",) -> ("granted", jeton, durée) ou ("busy", reste) ;
+    ("release", jeton). Si `persist_counter` est faux, le compteur de jetons est en
+    mémoire seulement : après une panne il repart de `first_token` (amnésie). Avec
+    `grace`, le service n'accorde aucun bail pendant une durée de bail après une reprise
+    (le temps que tout bail accordé avant la panne ait expiré).
+    """
+
+    def __init__(self, name: str = "verrous", lease: float = 10.0, first_token: int = 33,
+                 persist_counter: bool = True, grace: bool = False):
+        super().__init__(name)
+        self.lease = lease
+        self.grace = grace                     # après une reprise, attendre une durée de bail
+        self.blocked_until = -math.inf
+        self.first_token = first_token
+        self.persist_counter = persist_counter
+        self.counter = first_token - 1
+        self.disk_counter = self.counter
+        self.holder: Optional[str] = None
+        self.expiry = -math.inf
+        self.grants: List[Grant] = []
+
+    def on_message(self, src, msg):
+        now = self.local_time()
+        if msg[0] == "acquire":
+            if now < self.blocked_until:
+                self.send(src, ("busy", self.blocked_until - now))
+            elif self.holder is None or now >= self.expiry or self.holder == src:
+                self.counter += 1
+                if self.persist_counter:
+                    self.disk_counter = self.counter
+                self.holder, self.expiry = src, now + self.lease
+                self.grants.append(Grant(self.now, self.counter, src))
+                self.record(f"bail {self.counter} -> {src}")
+                self.send(src, ("granted", self.counter, self.lease))
+            else:
+                self.send(src, ("busy", self.expiry - now))
+        elif msg[0] == "release" and self.holder == src:
+            self.holder, self.expiry = None, -math.inf
+
+    def on_crash(self):
+        self.holder, self.expiry = None, -math.inf
+
+    def on_recover(self):
+        self.counter = self.disk_counter if self.persist_counter else self.first_token - 1
+        if self.grace:
+            self.blocked_until = self.local_time() + self.lease
+
+
+@dataclass
+class WriteRecord:
+    t: float
+    client: str
+    token: int
+    data: object
+    accepted: bool
+
+
+class FencedStorage(Node):
+    """Service de stockage ; avec `fencing`, refuse un jeton plus petit que le plus grand vu."""
+
+    def __init__(self, name: str = "stockage", fencing: bool = True):
+        super().__init__(name)
+        self.fencing = fencing
+        self.max_token = -1
+        self.writes: List[WriteRecord] = []
+
+    def on_message(self, src, msg):
+        if msg[0] != "write":
+            return
+        _, data, token = msg
+        ok = not (self.fencing and token < self.max_token)
+        if ok:
+            self.max_token = max(self.max_token, token)
+        self.writes.append(WriteRecord(self.now, src, token, data, ok))
+        self.send(src, ("ack" if ok else "rejected", token))
