@@ -645,3 +645,109 @@ class FencedStorage(Node):
             self.max_token = max(self.max_token, token)
         self.writes.append(WriteRecord(self.now, src, token, data, ok))
         self.send(src, ("ack" if ok else "rejected", token))
+
+
+class LeaseClient(Node):
+    """Client qui prend un bail, vérifie sa validité puis écrit dans le stockage.
+
+    Le code reproduit la boucle naïve du livre : on vérifie le bail (horloge locale), puis
+    on écrit, sans revérifier. Une pause programmée (`pauses` : liste de (instant réel,
+    durée)) gèle le processus : il ne traite plus ni messages ni minuteries, puis reprend
+    là où il en était, sans savoir qu'il a dormi.
+    """
+
+    def __init__(self, name: str, start: float = 0.0, work: float = 1.0, n_writes: int = 1,
+                 margin: float = 0.0, retry: float = 2.0, pause_before_write: float = 0.0,
+                 lock: str = "verrous", storage: str = "stockage", forever: bool = False):
+        super().__init__(name)
+        self.start, self.work, self.n_writes = start, work, n_writes
+        self.margin, self.retry = margin, retry
+        self.pause_before_write = pause_before_write
+        self.lock, self.storage = lock, storage
+        self.forever = forever
+        self.token: Optional[int] = None
+        self.deadline = -math.inf
+        self.done = 0
+        self.frozen_until = -math.inf
+        self.waiting = False
+        self.attempt = 0
+        self.asked_at = -math.inf
+        self.events: List[Tuple[float, str]] = []
+
+    # --- gel du processus ----------------------------------------------------------
+    def freeze(self, duration: float) -> None:
+        self.frozen_until = max(self.frozen_until, self.now + duration)
+        self.events.append((self.now, f"pause {duration:g}"))
+
+    def _guard(self, fn, *args):
+        def run():
+            if not self.up:
+                return
+            if self.now < self.frozen_until:
+                self.net.schedule(self.frozen_until - self.now, run)
+                return
+            fn(*args)
+        return run
+
+    def later(self, delay: float, fn, *args) -> None:
+        self.net.schedule(delay, self._guard(fn, *args))
+
+    # --- protocole ------------------------------------------------------------------
+    def on_start(self):
+        self.later(self.start, self.acquire)
+
+    def acquire(self):
+        if self.done >= self.n_writes and not self.forever:
+            return
+        self.waiting = True
+        self.attempt += 1
+        self.asked_at = self.local_time()        # le bail court au plus tôt depuis la demande
+        self.send(self.lock, ("acquire",))
+        self.later(self.retry * 2, self._timeout_acquire, self.attempt)
+
+    def _timeout_acquire(self, attempt):
+        if self.waiting and attempt == self.attempt:     # pas de réponse : on redemande
+            self.acquire()
+
+    def on_message(self, src, msg):
+        if self.now < self.frozen_until:
+            self.net.schedule(self.frozen_until - self.now, self._guard(self.on_message, src, msg))
+            return
+        kind = msg[0]
+        if kind == "granted":
+            if not self.waiting:          # réponse tardive à une demande déjà relancée
+                return
+            self.waiting = False
+            self.token = msg[1]
+            self.deadline = self.asked_at + msg[2] - self.margin
+            self.events.append((self.now, f"bail {self.token}"))
+            self.later(self.work, self.try_write)
+        elif kind == "busy":
+            self.waiting = False
+            self.later(min(self.retry, max(msg[1], 0.1)), self.acquire)
+        elif kind == "rejected":
+            self.events.append((self.now, f"refus {msg[1]}"))
+            self.token = None
+            self.deadline = -math.inf
+            self.later(self.retry, self.acquire)
+
+    def try_write(self):
+        if self.token is None:
+            return
+        if self.local_time() < self.deadline:          # « le bail est valide »
+            if self.pause_before_write:
+                p, self.pause_before_write = self.pause_before_write, 0.0
+                self.freeze(p)
+            self.net.schedule(0.0, self._guard(self._write))
+        else:
+            self.events.append((self.now, "bail expiré"))
+            self.token = None
+            self.acquire()
+
+    def _write(self):
+        if self.token is None:
+            return
+        self.done += 1
+        self.send(self.storage, ("write", f"{self.name}#{self.done}", self.token))
+        if self.done < self.n_writes or self.forever:
+            self.later(self.work, self.try_write)
