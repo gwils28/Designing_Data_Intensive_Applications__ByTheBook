@@ -751,3 +751,129 @@ class LeaseClient(Node):
         self.send(self.storage, ("write", f"{self.name}#{self.done}", self.token))
         if self.done < self.n_writes or self.forever:
             self.later(self.work, self.try_write)
+
+
+def one_shot_delays(base=(0.5, 1.5), extra: Optional[Dict[Tuple[str, str], List[float]]] = None):
+    """Fonction de latence pour `Network` : délai uniforme, plus des retards ponctuels.
+
+    extra[(src, dst)] est une liste de retards supplémentaires consommés un par un par les
+    messages successifs de src vers dst (0 : pas de retard).
+    """
+    extra = {k: list(v) for k, v in (extra or {}).items()}
+
+    def latency(rng, src, dst):
+        d = rng.uniform(*base)
+        lst = extra.get((src, dst))
+        if lst:
+            d += lst.pop(0)
+        return d
+    return latency
+
+
+def lease_scenario(fencing: bool = False, pause: float = 15.0, lease: float = 10.0,
+                   seed: int = 1, delayed_write: float = 0.0, until: float = 40.0):
+    """Scénario du livre : le client 1 prend un bail, fait une pause (ou son écriture est
+    retardée par le réseau), le client 2 prend le bail ; le client 1 écrit quand même.
+
+    Renvoie (réseau, service de verrous, stockage, clients).
+    """
+    extra = {("client1", "stockage"): [delayed_write]} if delayed_write else None
+    net = Network(seed=seed, latency=one_shot_delays((0.4, 1.0), extra))
+    lock = net.add(LockService(lease=lease))
+    store = net.add(FencedStorage(fencing=fencing))
+    c1 = net.add(LeaseClient("client1", start=0.5, work=1.0,
+                             pause_before_write=pause if not delayed_write else 0.0))
+    c2 = net.add(LeaseClient("client2", start=3.0, work=1.0, retry=2.0))
+    if delayed_write:
+        net.at(4.0, net.crash, "client1")
+    net.run(until=until)
+    return net, lock, store, (c1, c2)
+
+
+def zombie_writes(store: FencedStorage, grants: Sequence[Grant]) -> List[WriteRecord]:
+    """Écritures **acceptées** alors qu'un bail plus récent avait déjà été accordé."""
+    out = []
+    for w in store.writes:
+        if not w.accepted:
+            continue
+        newer = [g for g in grants if g.t <= w.t and g.token > w.token]
+        if newer:
+            out.append(w)
+    return out
+
+
+def token_order_violations(store: FencedStorage) -> List[WriteRecord]:
+    """Écritures acceptées dont le jeton est plus petit qu'un jeton déjà accepté, ou dont le
+    jeton a déjà servi à un autre client (deux détenteurs pour le même jeton)."""
+    out = []
+    best = -1
+    owner: Dict[int, str] = {}
+    for w in store.writes:
+        if not w.accepted:
+            continue
+        if w.token < best or owner.setdefault(w.token, w.client) != w.client:
+            out.append(w)
+        best = max(best, w.token)
+    return out
+
+
+class HeartbeatMember(Node):
+    """Membre d'un groupe qui détecte les pannes par battements de cœur et vote.
+
+    Chaque membre diffuse un battement toutes les `interval` ; il suspecte un pair qu'il
+    n'a pas entendu depuis `timeout` (horloge locale) et diffuse son vote. Un pair est
+    déclaré mort quand une **majorité** du groupe le suspecte.
+    """
+
+    def __init__(self, name: str, group: Sequence[str], interval: float = 1.0,
+                 timeout: float = 3.5):
+        super().__init__(name)
+        self.group = list(group)
+        self.interval, self.timeout = interval, timeout
+        self.last: Dict[str, float] = {}
+        self.suspects: set = set()
+        self.votes: Dict[str, set] = defaultdict(set)
+        self.declared: Dict[str, float] = {}
+
+    def on_start(self):
+        for p in self.group:
+            self.last[p] = self.local_time()
+        self.tick()
+
+    def tick(self):
+        for p in self.group:
+            if p != self.name:
+                self.send(p, ("hb",))
+        now = self.local_time()
+        for p in self.group:
+            if p == self.name:
+                continue
+            late = now - self.last[p] > self.timeout
+            if late and p not in self.suspects:
+                self.suspects.add(p)
+                self._vote(self.name, p, True)
+                for q in self.group:
+                    if q != self.name:
+                        self.send(q, ("suspect", p, True))
+        self.set_timer(self.interval, self.tick)
+
+    def on_recover(self):
+        self.tick()
+
+    def _vote(self, voter, p, guilty):
+        (self.votes[p].add if guilty else self.votes[p].discard)(voter)
+        if len(self.votes[p]) > len(self.group) // 2 and p not in self.declared:
+            self.declared[p] = self.now
+            self.record(f"{p} déclaré mort")
+
+    def on_message(self, src, msg):
+        if msg[0] == "hb":
+            self.last[src] = self.local_time()
+            if src in self.suspects:
+                self.suspects.discard(src)
+                self._vote(self.name, src, False)
+                for q in self.group:
+                    if q != self.name:
+                        self.send(q, ("suspect", src, False))
+        elif msg[0] == "suspect":
+            self._vote(src, msg[1], msg[2])
