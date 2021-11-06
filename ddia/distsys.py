@@ -877,3 +877,93 @@ class HeartbeatMember(Node):
                         self.send(q, ("suspect", src, False))
         elif msg[0] == "suspect":
             self._vote(src, msg[1], msg[2])
+
+
+def majorities_intersect(n: int) -> bool:
+    """Vérifie par force brute que deux majorités quelconques de n nœuds se rencontrent."""
+    q = n // 2 + 1
+    nodes = range(n)
+    majors = [set(c) for c in itertools.combinations(nodes, q)]
+    return all(a & b for a in majors for b in majors)
+
+
+def tolerated_faults(n: int, byzantine: bool = False) -> int:
+    """Nombre de nœuds défaillants tolérés : n = 2f + 1 (pannes) ou n = 3f + 1 (byzantin)."""
+    return (n - 1) // 3 if byzantine else (n - 1) // 2
+
+
+# =====================================================================================
+# 4. Fautes byzantines et formes faibles de mensonge
+# =====================================================================================
+
+
+def _majority(values: Sequence[int], default: int = 0) -> int:
+    c = Counter(values)
+    best = max(c.values())
+    winners = [v for v, k in c.items() if k == best]
+    return winners[0] if len(winners) == 1 else default
+
+
+def oral_messages(m: int, commander: int, lieutenants: Sequence[int], value: int,
+                  traitors: set, lie: Callable[[int, int, Tuple[int, ...]], int],
+                  path: Tuple[int, ...] = ()) -> Dict[int, int]:
+    """Algorithme OM(m) de Lamport, Shostak et Pease (1982), valeurs binaires.
+
+    Le commandant envoie `value` à chaque lieutenant (un traître envoie
+    `lie(émetteur, destinataire, chemin)`) ; pour m > 0, chaque lieutenant relaie la
+    valeur reçue aux autres via OM(m-1) puis prend la majorité. Renvoie la décision de
+    chaque lieutenant.
+    """
+    path = path + (commander,)
+    received = {}
+    for lt in lieutenants:
+        received[lt] = lie(commander, lt, path) if commander in traitors else value
+    if m == 0:
+        return received
+    relayed: Dict[int, Dict[int, int]] = {lt: {} for lt in lieutenants}
+    for j in lieutenants:
+        others = [x for x in lieutenants if x != j]
+        sub = oral_messages(m - 1, j, others, received[j], traitors, lie, path)
+        for i, v in sub.items():
+            relayed[i][j] = v
+    return {i: _majority([received[i]] + list(relayed[i].values())) for i in lieutenants}
+
+
+def byzantine_check(n: int, m: int, traitors: set, commander_value: int = 1,
+                    n_strategies: Optional[int] = None, seed: int = 0) -> Dict[str, object]:
+    """Teste OM(m) contre des traîtres qui mentent selon toutes les stratégies (ou un
+    échantillon) ; vérifie les deux conditions :
+
+    IC1 : tous les lieutenants loyaux décident la même valeur ;
+    IC2 : si le commandant (nœud 0) est loyal, ils décident sa valeur.
+    """
+    lieutenants = list(range(1, n))
+    rng = random.Random(seed)
+    calls: List[Tuple[int, int, Tuple[int, ...]]] = []
+
+    def probe(src, dst, path):
+        calls.append((src, dst, path))
+        return 0
+    oral_messages(m, 0, lieutenants, commander_value, traitors, probe)
+    keys = sorted(set(calls))
+    total = 2 ** len(keys)
+    if n_strategies is None or n_strategies >= total:
+        strategies = itertools.product((0, 1), repeat=len(keys))
+    else:
+        strategies = (tuple(rng.randint(0, 1) for _ in keys) for _ in range(n_strategies))
+    loyal = [x for x in lieutenants if x not in traitors]
+    tried = failures = 0
+    example = None
+    for bits in strategies:
+        table = dict(zip(keys, bits))
+        dec = oral_messages(m, 0, lieutenants, commander_value, traitors,
+                            lambda s, d, p: table[(s, d, p)])
+        vals = {dec[x] for x in loyal}
+        ok = len(vals) <= 1 and (0 in traitors or vals <= {commander_value})
+        tried += 1
+        if not ok:
+            failures += 1
+            if example is None:
+                example = {x: dec[x] for x in loyal}
+    return {"strategies": tried, "echecs": failures, "exemple": example,
+            "messages_par_execution": len(keys)}
