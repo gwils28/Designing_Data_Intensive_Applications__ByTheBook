@@ -967,3 +967,73 @@ def byzantine_check(n: int, m: int, traitors: set, commander_value: int = 1,
                 example = {x: dec[x] for x in loyal}
     return {"strategies": tried, "echecs": failures, "exemple": example,
             "messages_par_execution": len(keys)}
+
+
+def internet_checksum(data: bytes) -> int:
+    """Somme de contrôle d'Internet (RFC 1071), utilisée par IP, TCP et UDP : complément à
+    un de la somme des mots de 16 bits."""
+    if len(data) % 2:
+        data += b"\x00"
+    s = 0
+    for i in range(0, len(data), 2):
+        s += (data[i] << 8) | data[i + 1]
+        s = (s & 0xFFFF) + (s >> 16)
+    return (~s) & 0xFFFF
+
+
+def crc32(data: bytes) -> int:
+    return zlib.crc32(data) & 0xFFFFFFFF
+
+
+def corrupt(data: bytes, kind: str, rng: random.Random) -> bytes:
+    """Altère un paquet : "bit" (un bit inversé), "rafale" (16 bits consécutifs aléatoires),
+    "echange" (deux mots de 16 bits permutés), "zero16" (un mot 0x0000 devient 0xFFFF)."""
+    b = bytearray(data)
+    n = len(b)
+    if kind == "bit":
+        i = rng.randrange(n * 8)
+        b[i // 8] ^= 1 << (i % 8)
+    elif kind == "rafale":
+        i = rng.randrange(n - 2)
+        b[i] ^= rng.randrange(1, 256)
+        b[i + 1] ^= rng.randrange(256)
+    elif kind == "echange":
+        words = n // 2
+        while True:
+            i, j = rng.randrange(words), rng.randrange(words)
+            if b[2 * i:2 * i + 2] != b[2 * j:2 * j + 2]:
+                break
+        b[2 * i:2 * i + 2], b[2 * j:2 * j + 2] = b[2 * j:2 * j + 2], b[2 * i:2 * i + 2]
+    elif kind == "zero16":
+        zeros = [k for k in range(0, n - 1, 2) if b[k] == 0 and b[k + 1] == 0]
+        if not zeros:
+            b[0:2] = b"\x00\x00"
+            zeros = [0]
+        k = rng.choice(zeros)
+        b[k:k + 2] = b"\xff\xff"
+    else:
+        raise ValueError(kind)
+    return bytes(b)
+
+
+def detection_rates(kinds=("bit", "rafale", "echange", "zero16"), n_trials: int = 5000,
+                    size: int = 512, seed: int = 0) -> Dict[str, Dict[str, float]]:
+    """Proportion d'altérations détectées par la somme d'Internet et par CRC-32."""
+    rng = random.Random(seed)
+    out = {}
+    for kind in kinds:
+        det = {"somme Internet (16 bits)": 0, "CRC-32": 0}
+        for _ in range(n_trials):
+            raw = bytes(rng.randrange(256) if rng.random() < 0.7 else 0 for _ in range(size))
+            bad = corrupt(raw, kind, rng)
+            if bad == raw:
+                bad = corrupt(raw, "bit", rng)
+            det["somme Internet (16 bits)"] += internet_checksum(raw) != internet_checksum(bad)
+            det["CRC-32"] += crc32(raw) != crc32(bad)
+        out[kind] = {k: v / n_trials for k, v in det.items()}
+    return out
+
+
+# =====================================================================================
+# 5. Correction d'un algorithme : sûreté et vivacité
+# =====================================================================================
