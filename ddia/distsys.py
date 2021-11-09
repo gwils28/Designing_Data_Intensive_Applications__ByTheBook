@@ -1037,3 +1037,70 @@ def detection_rates(kinds=("bit", "rafale", "echange", "zero16"), n_trials: int 
 # =====================================================================================
 # 5. Correction d'un algorithme : sûreté et vivacité
 # =====================================================================================
+
+
+@dataclass
+class TokenRequest:
+    """Une requête à un générateur de jetons : début, fin (None si jamais répondue), jeton."""
+    client: str
+    start: float
+    end: Optional[float]
+    token: Optional[int]
+
+
+def check_token_history(history: Sequence[TokenRequest]) -> Dict[str, object]:
+    """Vérifie les propriétés d'un générateur de jetons de clôture sur un historique.
+
+    Sûreté : unicité (deux réponses n'ont jamais le même jeton) et séquence monotone (si x
+    se termine avant que y commence, t_x < t_y). Pour chaque violation, on renvoie
+    l'instant où elle devient visible (une violation de sûreté a une date).
+    Vivacité : les requêtes sans réponse ne prouvent rien sur un historique fini ; on les
+    compte seulement.
+    """
+    done = [h for h in history if h.end is not None]
+    violations = []
+    seen: Dict[int, TokenRequest] = {}
+    for h in sorted(done, key=lambda r: r.end):
+        if h.token in seen:
+            violations.append(("unicité", h.end, seen[h.token].client, h.client, h.token))
+        seen.setdefault(h.token, h)
+    for x in done:
+        for y in done:
+            if x.end < y.start and not x.token < y.token:
+                violations.append(("monotonie", y.end, x.client, y.client, (x.token, y.token)))
+    violations.sort(key=lambda v: v[1])
+    return {"violations": violations,
+            "premiere": violations[0][1] if violations else None,
+            "sans_reponse": sum(h.end is None for h in history)}
+
+
+def token_generator_history(n_requests: int = 60, crash_at: Optional[float] = 30.0,
+                            persist: bool = False, seed: int = 0) -> List[TokenRequest]:
+    """Historique d'un générateur de jetons (un compteur) dont le serveur peut tomber.
+
+    Les requêtes arrivent toutes les unités de temps environ ; pendant la panne (3 unités)
+    elles restent sans réponse. Au redémarrage, le compteur repart de la valeur sur disque
+    (`persist`) ou de zéro (amnésie, modèle « crash-recovery » mal géré).
+    """
+    rng = np.random.default_rng(seed)
+    counter = 0
+    hist = []
+    t = 0.0
+    down_until = -1.0
+    for i in range(n_requests):
+        t += rng.exponential(1.0)
+        if crash_at is not None and down_until < 0 and t >= crash_at:
+            down_until = t + 3.0
+            if not persist:
+                counter = 0
+        if t < down_until:
+            hist.append(TokenRequest(f"r{i}", t, None, None))
+            continue
+        counter += 1
+        hist.append(TokenRequest(f"r{i}", t, t + rng.uniform(0.05, 0.3), counter))
+    return hist
+
+
+# =====================================================================================
+# 6. Compléments : répliques sans leader, nœuds boiteux
+# =====================================================================================
