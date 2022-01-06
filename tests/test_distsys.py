@@ -98,3 +98,101 @@ def test_ntp_formules():
     assert abs(err) <= d / 2 + 1e-12
     _, _, err0 = ds.ntp_exchange(true_offset=-7.0, d_out=2.0, d_back=2.0)
     assert err0 == pytest.approx(0.0)
+
+
+def test_marzullo_ecarte_le_menteur():
+    k, lo, hi = ds.marzullo([(8, 12), (11, 13), (10, 12), (20, 22)])
+    assert (k, lo, hi) == (3, 11, 12)
+
+
+def test_lissage_seconde_intercalaire():
+    s = ds.smeared_offset(np.array([-1e6, 0.0, 1e6]), 0.0, window=86_400)
+    assert list(s) == [0.0, 0.5, 1.0]
+
+
+def test_horloge_ntp_saute_et_ralentit():
+    tr = ds.tod_clock_trace(duration=6 * 3600, seed=4)
+    assert tr["jumps"].sum() >= 1
+    assert np.abs(tr["offset_ms"]).max() < 200
+    sans_saut = ds.tod_clock_trace(duration=3600, drift_ppm=20, seed=1)
+    assert sans_saut["jumps"].sum() == 0
+
+
+def test_lww_perd_des_ecritures():
+    assert ds.lww_lost_writes(0.0, n_writes=5000)["perdues"] == 0.0
+    a = ds.lww_lost_writes(0.3, n_writes=50_000, mean_gap=1.0, seed=1)["perdues"]
+    assert a == pytest.approx(0.25 * (1 - math.exp(-0.3)), rel=0.2)
+
+
+def test_replique_lww_perd_l_increment():
+    net = Network(seed=1, latency=lambda r, s, d: {("n1", "n3"): 1.2, ("n1", "n2"): 4.0, ("n3", "n2"): 1.0}.get((s, d), 0.5))
+    peers = ["n1", "n2", "n3"]
+    reps = {p: net.add(ds.LWWReplica(p, [q for q in peers if q != p], clock=Clock(offset=o)))
+            for p, o in zip(peers, [3.0, 1.0, 0.0])}
+    from ddia.sim import Node
+    a, b = net.add(Node("a")), net.add(Node("b"))
+    net.at(1.0, a.send, "n1", ("set", 1))
+    net.at(2.9, b.send, "n3", ("incr",))
+    net.run()
+    assert all(r.value == 1 for r in reps.values())        # l'incrément a disparu partout
+
+
+def test_truetime_et_commit_wait():
+    tt = ds.TrueTime(base=1e-3, drift_ppm=200, sync_every=30)
+    assert tt.epsilon(0) == pytest.approx(1e-3)
+    assert tt.epsilon(29.999) == pytest.approx(7e-3, rel=1e-3)
+    lo, hi = tt.now(10.0)
+    assert lo <= 10.0 <= hi
+    sans = ds.commit_wait_experiment(eps=4e-3, commit_wait=False, seed=1)
+    avec = ds.commit_wait_experiment(eps=4e-3, commit_wait=True, seed=1)
+    assert sans["inversions"] > 0.1 and avec["inversions"] == 0.0
+    assert avec["attente_moy"] == pytest.approx(8e-3)
+
+
+# --- pauses, baux, jetons -------------------------------------------------------------------
+
+def test_pauses_gc():
+    p = ds.gc_pause_samples(500_000, seed=1)
+    assert np.median(p) < 0.01
+    assert (p > 10).mean() == pytest.approx(0.002 * (2 / 10) ** 1.5, rel=0.25)
+
+
+def test_routage_conscient_du_gc():
+    aveugle = ds.gc_aware_routing(n_requests=20_000, seed=1)
+    prevenu = ds.gc_aware_routing(n_requests=20_000, aware=True, seed=1)
+    assert np.percentile(aveugle, 99) > 0.1
+    assert np.percentile(prevenu, 99.9) == pytest.approx(0.005)
+
+
+def test_scenario_zombie_sans_et_avec_jetons():
+    _, lock, store, _ = ds.lease_scenario(fencing=False, pause=15.0)
+    assert [w.accepted for w in store.writes] == [True, True]
+    assert ds.token_order_violations(store)                # 33 accepté après 34
+    _, lock, store, (c1, _) = ds.lease_scenario(fencing=True, pause=15.0)
+    assert [(w.token, w.accepted) for w in store.writes] == [(34, True), (33, False)]
+    assert not ds.token_order_violations(store)
+    assert any("refus" in e for _, e in c1.events)
+
+
+def test_scenario_sans_pause_ok():
+    _, lock, store, _ = ds.lease_scenario(fencing=False, pause=0.0)
+    assert not ds.zombie_writes(store, lock.grants)
+    assert [g.token for g in lock.grants] == [33, 34]
+
+
+def test_requete_retardee():
+    _, _, store, _ = ds.lease_scenario(fencing=True, delayed_write=20.0, until=30)
+    assert [(w.client, w.accepted) for w in store.writes] == [("client2", True), ("client1", False)]
+
+
+def test_service_de_verrous_amnesique():
+    net = Network(seed=0, latency=(0.1, 0.2))
+    lock = net.add(ds.LockService(lease=5.0, first_token=1, persist_counter=False))
+    from ddia.sim import Node
+    c = net.add(Node("c"))
+    net.at(0.0, c.send, "verrous", ("acquire",))
+    net.at(1.0, net.crash, "verrous")
+    net.at(2.0, net.recover, "verrous")
+    net.at(3.0, c.send, "verrous", ("acquire",))
+    net.run()
+    assert [g.token for g in lock.grants] == [1, 1]       # le jeton 1 est redonné
