@@ -196,3 +196,83 @@ def test_service_de_verrous_amnesique():
     net.at(3.0, c.send, "verrous", ("acquire",))
     net.run()
     assert [g.token for g in lock.grants] == [1, 1]       # le jeton 1 est redonné
+
+
+def test_delai_de_grace():
+    net = Network(seed=0, latency=(0.1, 0.2))
+    lock = net.add(ds.LockService(lease=5.0, first_token=1, grace=True))
+    from ddia.sim import Node
+    c = net.add(Node("c"))
+    net.at(1.0, net.crash, "verrous")
+    net.at(2.0, net.recover, "verrous")
+    net.at(3.0, c.send, "verrous", ("acquire",))
+    net.at(8.0, c.send, "verrous", ("acquire",))
+    net.run()
+    assert [g.t > 7.0 for g in lock.grants] == [True]
+
+
+def test_majorite_et_byzantin():
+    assert all(ds.majorities_intersect(n) for n in range(1, 8))
+    assert [ds.tolerated_faults(n) for n in (3, 4, 5)] == [1, 1, 2]
+    assert ds.tolerated_faults(4, byzantine=True) == 1
+    assert ds.tolerated_faults(3, byzantine=True) == 0
+
+
+def test_appartenance_faute_asymetrique():
+    net = Network(seed=2, latency=(0.2, 0.6))
+    grp = ["A", "B", "C"]
+    nodes = {g: net.add(ds.HeartbeatMember(g, grp)) for g in grp}
+    net.at(5.0, net.block, "A", "B")
+    net.at(5.0, net.block, "A", "C")
+    net.run(until=16)
+    assert "A" in nodes["B"].declared and "A" in nodes["C"].declared
+    assert not nodes["A"].suspects                         # A ne se doute de rien
+
+
+# --- byzantin et sommes de contrôle ------------------------------------------------------------
+
+def test_om1_trois_et_quatre_generaux():
+    assert ds.byzantine_check(3, 1, {2})["echecs"] > 0
+    assert ds.byzantine_check(4, 1, {3})["echecs"] == 0
+    assert ds.byzantine_check(4, 1, {0})["echecs"] == 0
+    assert ds.byzantine_check(4, 1, {2, 3})["echecs"] > 0
+
+
+def test_om2_sept_generaux():
+    assert ds.byzantine_check(7, 2, {5, 6}, n_strategies=300, seed=1)["echecs"] == 0
+
+
+def test_somme_internet():
+    # exemple de la RFC 1071 : 00 01 f2 03 f4 f5 f6 f7 -> somme 0xddf2, complément 0x220d
+    assert ds.internet_checksum(bytes([0x00, 0x01, 0xF2, 0x03, 0xF4, 0xF5, 0xF6, 0xF7])) == 0x220D
+    a = bytes(range(16))
+    b = a[2:4] + a[0:2] + a[4:]                            # deux mots échangés
+    assert ds.internet_checksum(a) == ds.internet_checksum(b)
+    assert ds.crc32(a) != ds.crc32(b)
+
+
+def test_taux_de_detection():
+    r = ds.detection_rates(n_trials=300, size=128, seed=1)
+    assert r["bit"]["somme Internet (16 bits)"] == 1.0
+    assert r["echange"]["somme Internet (16 bits)"] == 0.0
+    assert r["echange"]["CRC-32"] == 1.0
+
+
+# --- correction ---------------------------------------------------------------------------------
+
+def test_verification_historique_jetons():
+    ok = [ds.TokenRequest("a", 0, 1, 1), ds.TokenRequest("b", 2, 3, 2), ds.TokenRequest("c", 2.5, None, None)]
+    r = ds.check_token_history(ok)
+    assert r["violations"] == [] and r["sans_reponse"] == 1
+    ko = [ds.TokenRequest("a", 0, 1, 5), ds.TokenRequest("b", 2, 3, 5)]
+    r = ds.check_token_history(ko)
+    assert {v[0] for v in r["violations"]} == {"unicité", "monotonie"}
+    assert r["premiere"] == 3
+
+
+def test_generateur_amnesique():
+    assert ds.check_token_history(ds.token_generator_history(persist=False))["violations"]
+    assert not ds.check_token_history(ds.token_generator_history(persist=True))["violations"]
+
+
+# --- notions de la 2e édition (fonctions dédiées) -------------------------------------------
