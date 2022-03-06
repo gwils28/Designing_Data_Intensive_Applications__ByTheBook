@@ -120,3 +120,73 @@ def _points(history: Sequence[Op], order: Sequence[int]) -> List[float]:
         pts.append(p)
         prev = p
     return pts
+
+
+def check_linearizable(history: Sequence[Op], init: Any = 0,
+                       step: Callable = register_step, max_states: int = 2_000_000) -> LinResult:
+    """Cherche un ordre séquentiel des opérations qui respecte le temps réel et le modèle.
+
+    Une opération peut être placée en tête de ce qui reste si aucune opération restante ne
+    s'est **terminée avant son appel** (sinon celle-ci doit passer devant). On explore ces
+    choix en profondeur, en mémorisant les couples (ensemble déjà placé, état du registre)
+    déjà essayés : c'est l'algorithme de Wing et Gong avec la mémoïsation de Lowe.
+    Complexité exponentielle dans le pire cas (le problème est NP-complet), mais rapide
+    sur les historiques courts ou peu concurrents.
+    """
+    ops = list(history)
+    n = len(ops)
+    by_call = sorted(range(n), key=lambda i: ops[i].t_call)
+    required = 0
+    for i, o in enumerate(ops):
+        if o.done:
+            required |= 1 << i
+    seen = set()
+    path: List[int] = []
+    best: List[int] = []
+    explored = 0
+
+    def dfs(mask: int, state) -> bool:
+        nonlocal explored, best
+        if mask & required == required:
+            return True
+        key = (mask, state)
+        if key in seen:
+            return False
+        seen.add(key)
+        explored += 1
+        if explored > max_states:
+            raise RuntimeError("vérification abandonnée : trop d'états")
+        min_ret = INF
+        for i in range(n):
+            if not (mask >> i) & 1 and ops[i].t_return < min_ret:
+                min_ret = ops[i].t_return
+        for i in by_call:
+            if (mask >> i) & 1:
+                continue
+            if ops[i].t_call > min_ret:
+                break
+            ok, s2 = step(state, ops[i])
+            if ok:
+                path.append(i)
+                if len(path) > len(best):
+                    best = list(path)
+                if dfs(mask | (1 << i), s2):
+                    return True
+                path.pop()
+        return False
+
+    ok = dfs(0, init)
+    order = list(path) if ok else best
+    return LinResult(ok, order, _points(ops, order), explored)
+
+
+def op_label(op: Op) -> str:
+    """Étiquette compacte : w(1), r→0, cas(0→2) ok, avec « ? » si sans réponse."""
+    if op.kind == "write":
+        s = f"w({op.arg})"
+    elif op.kind == "read":
+        s = f"r→{op.result}" if op.done else "r→?"
+    else:
+        old, new = op.arg
+        s = f"cas({old}→{new})" + ((" ok" if op.result else " échec") if op.done else " ?")
+    return s
