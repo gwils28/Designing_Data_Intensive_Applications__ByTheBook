@@ -75,7 +75,7 @@ Lancer les tests : `pytest tests/`.
 | 6 | [Partitionnement](notebooks/ch06_partitionnement) | ✅ |
 | 7 | [Transactions](notebooks/ch07_transactions) | ✅ |
 | 8 | [Les problèmes des systèmes distribués](notebooks/ch08_problemes_systemes_distribues) | ✅ |
-| 9 | Cohérence et consensus | ⬜ |
+| 9 | Cohérence et consensus | 🚧 |
 | | *Partie III - Données dérivées* | |
 | 10 | Traitement par lots | ⬜ |
 | 11 | Traitement de flux | ⬜ |
