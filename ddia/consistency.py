@@ -190,3 +190,141 @@ def op_label(op: Op) -> str:
         old, new = op.arg
         s = f"cas({old}→{new})" + ((" ok" if op.result else " échec") if op.done else " ?")
     return s
+
+
+def plot_history(history: Sequence[Op], title: str = "", subtitle: str = "", result: LinResult | None = None,
+                 clients: Sequence[str] | None = None, t_max: float | None = None, width: float = 11,
+                 highlight: Sequence[int] = (), show_points: bool = True, fontsize: float = 8.5):
+    """Dessine un historique (une ligne par client) et, si `result` est fourni et valide,
+    les points de linéarisation reliés dans l'ordre trouvé. Renvoie la toile SpaceTime."""
+    from .plotting import GREEN, INDIGO, ROSE, SLATE, TEAL, VIOLET, AMBER
+    from .timelines import SpaceTime
+
+    clients = list(clients) if clients else list(dict.fromkeys(o.client for o in history))
+    finite = [o.t_return for o in history if o.t_return < INF] + [o.t_call for o in history]
+    t_max = t_max or max(finite) * 1.05
+    st = SpaceTime(clients, t_max=t_max, title=title, subtitle=subtitle, width=width,
+                   lane_height=1.0)
+    colors = {"write": INDIGO, "read": TEAL, "cas": VIOLET}
+    for i, o in enumerate(history):
+        c = ROSE if i in highlight else colors[o.kind]
+        t1 = o.t_return if o.t_return < INF else t_max
+        st.op(o.client, o.t_call, t1, op_label(o), color=c, fontsize=fontsize)
+        if not o.done:
+            st.note(t_max * 0.995, o.client, "pas de réponse", dy=-0.28, fontsize=7.5)
+    if result is not None and show_points and result.order:
+        xs = result.points
+        ys = [st.y[history[i].client] for i in result.order]
+        col = GREEN if result.ok else AMBER
+        st.ax.plot(xs, ys, color=col, lw=1.3, zorder=5, alpha=0.9)
+        st.ax.plot(xs, ys, "o", color=col, markersize=5, zorder=6, markeredgecolor="white")
+        for k, (x, y) in enumerate(zip(xs, ys)):
+            st.ax.text(x, y - 0.2, str(k + 1), fontsize=7, color=col, ha="center", va="top", zorder=7)
+    return st
+
+
+# ------------------------------------------------------------- registre sur quorum
+
+def lognormal_latency(base: float = 1.0, sigma: float = 0.8, slow: Dict[Tuple[str, str], float] | None = None):
+    """Fonction de latence pour `Network` : base * LogNormale(0, sigma), éventuellement
+    multipliée pour certains liens lents ({(src, dst): facteur})."""
+    slow = slow or {}
+
+    def f(rng, src, dst):
+        return base * rng.lognormvariate(0.0, sigma) * slow.get((src, dst), 1.0)
+    return f
+
+
+class QuorumReplica(Node):
+    """Réplique d'un registre : garde (horodatage, valeur) et applique la règle LWW."""
+
+    def __init__(self, name: str, init: Any = 0):
+        super().__init__(name)
+        self.ts: Tuple = (0, "")
+        self.value = init
+
+    def on_message(self, src, msg):
+        if msg[0] == "get":
+            self.send(src, ("val", msg[1], self.ts, self.value))
+        elif msg[0] == "set":
+            _, rid, ts, v = msg
+            if ts > self.ts:
+                self.ts, self.value = ts, v
+            self.send(src, ("ack", rid))
+
+
+class QuorumClient(Node):
+    """Client d'un registre répliqué sans leader (n répliques, quorums w et r).
+
+    mode="dynamo" : écriture = envoi à toutes les répliques avec un horodatage local,
+    attente de w accusés ; lecture = attente de r réponses, valeur la plus récente.
+    mode="abd" (Attiya, Bar-Noy, Dolev) : l'écrivain lit d'abord l'horodatage maximal sur
+    un quorum ; le lecteur réécrit la valeur lue sur un quorum (réparation **synchrone**)
+    avant de répondre. C'est linéarisable, au prix d'un second aller-retour.
+    """
+
+    def __init__(self, name: str, replicas: Sequence[str], w: int, r: int, mode: str = "dynamo",
+                 script: Sequence[Tuple] = (), history: List[Op] | None = None):
+        super().__init__(name)
+        self.replicas, self.w, self.r, self.mode = list(replicas), w, r, mode
+        self.script = list(script)       # [(délai avant l'opération, "read"/"write", valeur)]
+        self.history = history if history is not None else []
+        self.counter = 0
+        self.rid = 0
+        self.cur: Optional[dict] = None
+
+    def on_start(self):
+        self._next()
+
+    def _next(self):
+        if not self.script:
+            return
+        delay, kind, value = self.script.pop(0)
+        self.set_timer(delay, self._begin, kind, value)
+
+    def _begin(self, kind, value):
+        self.rid += 1
+        op = Op(self.name, kind, value if kind == "write" else None, t_call=self.now)
+        self.cur = dict(op=op, rid=self.rid, phase=1, got=[], acks=0)
+        if kind == "write" and self.mode == "dynamo":
+            self.counter += 1
+            ts = (self.counter, self.name)
+            self.cur.update(phase=2, ts=ts, v=value)
+            for rep in self.replicas:
+                self.send(rep, ("set", self.rid, ts, value))
+        else:
+            for rep in self.replicas:
+                self.send(rep, ("get", self.rid))
+
+    def _finish(self, result):
+        op = self.cur["op"]
+        op.result, op.t_return = result, self.now
+        self.history.append(op)
+        self.cur = None
+        self._next()
+
+    def on_message(self, src, msg):
+        c = self.cur
+        if c is None or msg[1] != c["rid"]:
+            return
+        if msg[0] == "val" and c["phase"] == 1:
+            c["got"].append((msg[2], msg[3]))
+            if len(c["got"]) == self.r:
+                ts, v = max(c["got"], key=lambda x: x[0])
+                op = c["op"]
+                if op.kind == "read" and self.mode == "dynamo":
+                    self._finish(v)
+                    return
+                if op.kind == "read":         # ABD : réparation synchrone avant de répondre
+                    c.update(phase=2, ts=ts, v=v, result=v)
+                else:                          # ABD : écriture avec un horodatage plus grand
+                    ts = (ts[0] + 1, self.name)
+                    c.update(phase=2, ts=ts, v=op.arg, result="ok")
+                self.rid += 1
+                c["rid"] = self.rid
+                for rep in self.replicas:
+                    self.send(rep, ("set", self.rid, c["ts"], c["v"]))
+        elif msg[0] == "ack" and c["phase"] == 2:
+            c["acks"] += 1
+            if c["acks"] == self.w:
+                self._finish(c.get("result", "ok"))
