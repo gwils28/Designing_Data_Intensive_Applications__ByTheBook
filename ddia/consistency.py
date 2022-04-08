@@ -328,3 +328,79 @@ class QuorumClient(Node):
             c["acks"] += 1
             if c["acks"] == self.w:
                 self._finish(c.get("result", "ok"))
+
+
+def run_quorum_register(n: int = 3, w: int = 2, r: int = 2, mode: str = "dynamo", n_readers: int = 2,
+                        n_ops: int = 6, sigma: float = 0.8, seed: int = 0, think: float = 1.0,
+                        n_writers: int = 1, until: float = 1e4):
+    """Simule un registre répliqué sur quorum ; renvoie (historique trié par appel, réseau).
+
+    Les écrivains écrivent des valeurs entières distinctes (1, 2, 3... pour le premier,
+    101, 102... pour le second), les lecteurs lisent en boucle.
+    """
+    rng = random.Random(seed)
+    net = Network(seed=seed, latency=lognormal_latency(1.0, sigma))
+    reps = [f"R{i + 1}" for i in range(n)]
+    for name in reps:
+        net.add(QuorumReplica(name))
+    history: List[Op] = []
+    for k in range(n_writers):
+        script = [(rng.expovariate(1 / think), "write", 100 * k + j + 1) for j in range(n_ops)]
+        net.add(QuorumClient(f"W{k + 1}" if n_writers > 1 else "W", reps, w, r, mode, script, history))
+    for k in range(n_readers):
+        script = [(rng.expovariate(1 / think), "read", None) for _ in range(n_ops + 2)]
+        net.add(QuorumClient(chr(ord("A") + k), reps, w, r, mode, script, history))
+    net.run(until=until)
+    history.sort(key=lambda o: o.t_call)
+    return history, net
+
+
+# =====================================================================================
+# 2. Ordre, horloges logiques et identifiants
+# =====================================================================================
+
+class LamportClock:
+    """Horloge de Lamport : horodatage = (compteur, identifiant du nœud)."""
+
+    def __init__(self, node: str):
+        self.node = node
+        self.counter = 0
+
+    def tick(self) -> Tuple[int, str]:
+        """Nouvel événement local (ou émission d'un message)."""
+        self.counter += 1
+        return (self.counter, self.node)
+
+    def observe(self, ts: Tuple[int, str]) -> None:
+        """Réception d'un horodatage : le compteur rattrape au moins sa valeur."""
+        self.counter = max(self.counter, ts[0])
+
+
+class VectorClock:
+    """Horloge vectorielle : un compteur par nœud."""
+
+    def __init__(self, node: str, nodes: Sequence[str]):
+        self.node = node
+        self.v = {x: 0 for x in nodes}
+
+    def tick(self) -> Dict[str, int]:
+        self.v[self.node] += 1
+        return dict(self.v)
+
+    def observe(self, other: Dict[str, int]) -> None:
+        for k, x in other.items():
+            self.v[k] = max(self.v.get(k, 0), x)
+
+
+def vc_compare(a: Dict[str, int], b: Dict[str, int]) -> str:
+    """'<' (a avant b), '>' (b avant a), '=' ou '||' (concurrents)."""
+    keys = set(a) | set(b)
+    le = all(a.get(k, 0) <= b.get(k, 0) for k in keys)
+    ge = all(a.get(k, 0) >= b.get(k, 0) for k in keys)
+    if le and ge:
+        return "="
+    if le:
+        return "<"
+    if ge:
+        return ">"
+    return "||"
