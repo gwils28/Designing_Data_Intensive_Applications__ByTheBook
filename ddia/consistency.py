@@ -481,3 +481,80 @@ def causal_order_errors(events: Sequence[dict], key: str) -> dict:
                 wrong += 1
     return dict(paires=total, causales=causal, inversées=wrong,
                 taux_inversion=wrong / causal if causal else 0.0, part_concurrentes=conc / total if total else 0.0)
+
+
+def assign_ids(scheme: str, times: np.ndarray, nodes: np.ndarray, n_nodes: int, block: int = 100,
+               offsets: Sequence[float] | None = None, tick: float = 1e-3) -> np.ndarray:
+    """Attribue un identifiant à chaque requête (instants réels `times` croissants, nœud
+    traitant `nodes`) selon un schéma :
+
+    - "central" : un compteur unique (référence linéarisable) ;
+    - "sharded" : le nœud k distribue k, k + n, k + 2n... (pair / impair pour n = 2) ;
+    - "blocks" : chaque nœud réserve des blocs de `block` identifiants consécutifs ;
+    - "wallclock" : (horloge du nœud arrondie à `tick`, nœud, séquence), horloge décalée
+      de `offsets[k]`.
+    """
+    n = len(times)
+    ids = np.empty(n, dtype=np.int64)
+    if scheme == "central":
+        ids[:] = np.arange(1, n + 1)
+    elif scheme == "sharded":
+        cnt = np.zeros(n_nodes, dtype=np.int64)
+        for i, k in enumerate(nodes):
+            ids[i] = cnt[k] * n_nodes + k + 1
+            cnt[k] += 1
+    elif scheme == "blocks":
+        nxt = 1
+        cur = np.zeros(n_nodes, dtype=np.int64)
+        end = np.zeros(n_nodes, dtype=np.int64)
+        for i, k in enumerate(nodes):
+            if cur[k] >= end[k]:
+                cur[k], end[k] = nxt, nxt + block
+                nxt += block
+            ids[i] = cur[k]
+            cur[k] += 1
+    elif scheme == "wallclock":
+        offsets = np.zeros(n_nodes) if offsets is None else np.asarray(offsets, dtype=float)
+        last = {}
+        for i, (t, k) in enumerate(zip(times, nodes)):
+            ms = int(math.floor((t + offsets[k]) / tick))
+            seq = last.get((k, ms), -1) + 1
+            last[(k, ms)] = seq
+            ids[i] = (ms * 64 + int(k)) * 4096 + seq
+    else:
+        raise ValueError(scheme)
+    return ids
+
+
+def inversion_curve(times: np.ndarray, ids: np.ndarray, gaps: Sequence[float], n_pairs: int = 4000,
+                    seed: int = 0) -> np.ndarray:
+    """Pour chaque écart g : probabilité qu'une requête commencée g après une autre reçoive
+    un identifiant **plus petit** (violation de l'ordre réel)."""
+    rng = np.random.default_rng(seed)
+    out = []
+    n = len(times)
+    for g in gaps:
+        i = rng.integers(0, n, n_pairs)
+        j = np.searchsorted(times, times[i] + g, side="left")
+        ok = j < n
+        out.append(float(np.mean(ids[j[ok]] < ids[i[ok]])) if ok.any() else np.nan)
+    return np.array(out)
+
+
+# =====================================================================================
+# 3. Diffusion à ordre total et Raft
+# =====================================================================================
+
+class Sequencer(Node):
+    """Séquenceur : numérote les demandes d'ajout et les diffuse à toutes les répliques."""
+
+    def __init__(self, name: str, replicas: Sequence[str]):
+        super().__init__(name)
+        self.replicas = list(replicas)
+        self.seq = 0
+
+    def on_message(self, src, msg):
+        if msg[0] == "append":
+            self.seq += 1
+            for r in self.replicas:
+                self.send(r, ("deliver", self.seq, msg[1]))
