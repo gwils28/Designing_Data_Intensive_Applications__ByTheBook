@@ -404,3 +404,80 @@ def vc_compare(a: Dict[str, int], b: Dict[str, int]) -> str:
     if ge:
         return ">"
     return "||"
+
+
+class _ChatUser(Node):
+    def __init__(self, name, users, rate, reply_prob, think, events, rng, extra):
+        super().__init__(name)
+        self.lamport = LamportClock(name)
+        self.vc = VectorClock(name, users)
+        self.rate, self.reply_prob, self.think = rate, reply_prob, think
+        self.events, self.rng = events, rng
+        self.extra = {k: f(self) for k, f in extra.items()}
+
+    def on_start(self):
+        self.set_timer(self.rng.expovariate(self.rate), self._spontaneous)
+
+    def _spontaneous(self):
+        self._post(None)
+        self.set_timer(self.rng.expovariate(self.rate), self._spontaneous)
+
+    def _post(self, reply_to):
+        ev = dict(id=len(self.events), user=self.name, t_real=self.now, t_phys=self.local_time(),
+                  lamport=self.lamport.tick(), vc=self.vc.tick(), reply_to=reply_to)
+        for k, clk in self.extra.items():
+            ev[k] = clk.send()
+        self.events.append(ev)
+        self.broadcast(("msg", ev))
+
+    def on_message(self, src, msg):
+        ev = msg[1]
+        self.lamport.observe(ev["lamport"])
+        self.vc.observe(ev["vc"])
+        for k, clk in self.extra.items():
+            clk.recv(ev[k])
+        if self.rng.random() < self.reply_prob:
+            self.set_timer(self.rng.expovariate(1 / self.think), self._post, ev["id"])
+
+
+def run_chat(n_users: int = 4, duration: float = 60.0, rate: float = 0.05, reply_prob: float = 0.3,
+             think: float = 2.0, offsets: Sequence[float] | None = None, latency=(0.5, 3.0),
+             seed: int = 0, extra_clocks: Dict[str, Callable] | None = None) -> List[dict]:
+    """Messagerie de groupe simulée : chaque utilisateur poste spontanément (Poisson de taux
+    `rate`) et répond parfois aux messages reçus. Chaque message est horodaté par l'horloge
+    physique du nœud (décalée de `offsets`), une horloge de Lamport et une horloge
+    vectorielle (la vérité sur la causalité). `extra_clocks` : {nom: fabrique(nœud)} d'objets
+    ayant send() et recv(ts), pour comparer d'autres horloges."""
+    users = [f"u{i + 1}" for i in range(n_users)]
+    offsets = list(offsets) if offsets is not None else [0.0] * n_users
+    rng = random.Random(seed)
+    net = Network(seed=seed, latency=latency)
+    events: List[dict] = []
+    for u, off in zip(users, offsets):
+        net.add(_ChatUser(u, users, rate, reply_prob, think, events, random.Random(rng.random()),
+                          extra_clocks or {}))
+        net[u].clock = Clock(offset=off)
+    net.run(until=duration)
+    return events
+
+
+def causal_order_errors(events: Sequence[dict], key: str) -> dict:
+    """Compare l'ordre donné par events[i][key] à la causalité (horloges vectorielles).
+
+    Renvoie le nombre de paires causalement liées, la part d'entre elles que la clé
+    ordonne à l'envers, et la part de paires concurrentes."""
+    causal = wrong = conc = total = 0
+    for i in range(len(events)):
+        for j in range(i + 1, len(events)):
+            a, b = events[i], events[j]
+            rel = vc_compare(a["vc"], b["vc"])
+            total += 1
+            if rel == "||":
+                conc += 1
+                continue
+            causal += 1
+            first, second = (a, b) if rel == "<" else (b, a)
+            if not first[key] < second[key]:
+                wrong += 1
+    return dict(paires=total, causales=causal, inversées=wrong,
+                taux_inversion=wrong / causal if causal else 0.0, part_concurrentes=conc / total if total else 0.0)
