@@ -558,3 +558,91 @@ class Sequencer(Node):
             self.seq += 1
             for r in self.replicas:
                 self.send(r, ("deliver", self.seq, msg[1]))
+
+
+class LogReplica(Node):
+    """Réplique d'un registre de noms d'utilisateur alimentée par un journal.
+
+    total_order=True : les entrées passent par le séquenceur et sont appliquées dans
+    l'ordre des numéros (tampon pour les arrivées désordonnées) ; False : chaque réplique
+    applique les demandes dans leur ordre d'arrivée (diffusion naïve)."""
+
+    def __init__(self, name: str, total_order: bool = True, sequencer: str = "séquenceur"):
+        super().__init__(name)
+        self.total_order, self.sequencer = total_order, sequencer
+        self.buffer: Dict[int, Any] = {}
+        self.next_seq = 1
+        self.log: List[Any] = []
+        self.owner: Dict[str, str] = {}
+        self.answers: Dict[Tuple[str, str], bool] = {}
+        self.apply_times: List[float] = []
+
+    def claim(self, username: str, user: str, peers: Sequence[str]):
+        """Demande locale : réserver `username` pour `user`."""
+        entry = ("claim", username, user)
+        if self.total_order:
+            self.send(self.sequencer, ("append", entry))
+        else:
+            self._apply(entry)
+            for p in peers:
+                if p != self.name:
+                    self.send(p, ("raw", entry))
+
+    def _apply(self, entry):
+        self.log.append(entry)
+        self.apply_times.append(self.now)
+        _, username, user = entry
+        if username not in self.owner:
+            self.owner[username] = user
+        self.answers[(username, user)] = self.owner[username] == user
+
+    def on_message(self, src, msg):
+        if msg[0] == "raw":
+            self._apply(msg[1])
+        elif msg[0] == "deliver":
+            self.buffer[msg[1]] = msg[2]
+            while self.next_seq in self.buffer:
+                self._apply(self.buffer.pop(self.next_seq))
+                self.next_seq += 1
+
+
+def run_registry(claims: Sequence[Tuple[float, str, str, str]], n_replicas: int = 3,
+                 total_order: bool = True, latency=(0.5, 4.0), seed: int = 0):
+    """claims : [(instant, réplique, nom demandé, utilisateur)]. Renvoie (réseau, répliques)."""
+    net = Network(seed=seed, latency=latency)
+    names = [f"r{i + 1}" for i in range(n_replicas)]
+    reps = [net.add(LogReplica(x, total_order)) for x in names]
+    if total_order:
+        net.add(Sequencer("séquenceur", names))
+    for t, rep, username, user in claims:
+        net.at(t, net[rep].claim, username, user, names)
+    net.run()
+    return net, reps
+
+
+# ------------------------------------------------------------------ Paxos (une valeur)
+
+class PaxosAcceptor(Node):
+    """Accepteur de Paxos (une seule décision) : promet de ne plus écouter les numéros de
+    scrutin inférieurs et se souvient de la dernière proposition acceptée."""
+
+    def __init__(self, name: str):
+        super().__init__(name)
+        self.promised: Tuple = (0, "")
+        self.accepted: Optional[Tuple[Tuple, Any]] = None
+
+    def on_message(self, src, msg):
+        kind, ballot = msg[0], msg[1]
+        if kind == "prepare":
+            if ballot > self.promised:
+                self.promised = ballot
+                self.send(src, ("promise", ballot, self.accepted))
+            else:
+                self.send(src, ("nack", ballot, self.promised))
+        elif kind == "accept":
+            if ballot >= self.promised:
+                self.promised = ballot
+                self.accepted = (ballot, msg[2])
+                self.send(src, ("accepted", ballot))
+            else:
+                self.send(src, ("nack", ballot, self.promised))
