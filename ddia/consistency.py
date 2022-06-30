@@ -646,3 +646,85 @@ class PaxosAcceptor(Node):
                 self.send(src, ("accepted", ballot))
             else:
                 self.send(src, ("nack", ballot, self.promised))
+
+
+class PaxosProposer(Node):
+    """Proposeur de Paxos : phase 1 (prepare / promise) puis phase 2 (accept / accepted),
+    chacune auprès d'une majorité d'accepteurs. En cas de refus ou de délai dépassé, il
+    recommence avec un numéro plus grand après une attente `backoff` : (min, max) tirée au
+    hasard, ou un nombre fixe (déterministe, ce qui peut provoquer un duel sans fin)."""
+
+    def __init__(self, name: str, acceptors: Sequence[str], value: Any, start: float = 0.0,
+                 backoff=(2.0, 6.0), timeout: float = 10.0, decisions: List[dict] | None = None,
+                 peers: Sequence[str] = (), seed: int = 0):
+        super().__init__(name)
+        self.acceptors, self.value, self.start = list(acceptors), value, start
+        self.backoff, self.timeout = backoff, timeout
+        self.decisions = decisions if decisions is not None else []
+        self.peers = [p for p in peers if p != name]
+        self.rng = random.Random(f"{seed}-{name}")
+        self.n = 0
+        self.highest = 0
+        self.ballot: Tuple = (0, name)
+        self.phase = 0
+        self.replies: List = []
+        self.decided: Any = None
+        self.rounds = 0
+
+    @property
+    def majority(self) -> int:
+        return len(self.acceptors) // 2 + 1
+
+    def on_start(self):
+        self.set_timer(self.start, self._round)
+
+    def _round(self):
+        if self.decided is not None:
+            return
+        self.rounds += 1
+        self.n = max(self.n, self.highest) + 1
+        self.ballot = (self.n, self.name)
+        self.phase, self.replies = 1, []
+        for a in self.acceptors:
+            self.send(a, ("prepare", self.ballot))
+        b = self.ballot
+        self.set_timer(self.timeout, self._expire, b)
+
+    def _expire(self, ballot):
+        if self.decided is None and ballot == self.ballot and self.phase in (1, 2):
+            self._retry()
+
+    def _retry(self):
+        self.phase = 0
+        wait = self.rng.uniform(*self.backoff) if isinstance(self.backoff, tuple) else float(self.backoff)
+        self.set_timer(wait, self._round)
+
+    def on_message(self, src, msg):
+        kind = msg[0]
+        if kind == "decided":
+            if self.decided is None:
+                self.decided = msg[1]
+                self.phase = 3
+            return
+        if self.decided is not None or msg[1] != self.ballot:
+            return
+        if kind == "nack":
+            self.highest = max(self.highest, msg[2][0])
+            if self.phase in (1, 2):
+                self._retry()
+        elif kind == "promise" and self.phase == 1:
+            self.replies.append(msg[2])
+            if len(self.replies) == self.majority:
+                prev = [acc for acc in self.replies if acc is not None]
+                v = max(prev, key=lambda x: x[0])[1] if prev else self.value
+                self.phase, self.replies, self.proposal = 2, [], v
+                for a in self.acceptors:
+                    self.send(a, ("accept", self.ballot, v))
+        elif kind == "accepted" and self.phase == 2:
+            self.replies.append(src)
+            if len(self.replies) == self.majority:
+                self.decided, self.phase = self.proposal, 3
+                self.decisions.append(dict(t=self.now, proposer=self.name, value=self.proposal,
+                                           ballot=self.ballot, rounds=self.rounds))
+                for p in self.peers:
+                    self.send(p, ("decided", self.proposal))
