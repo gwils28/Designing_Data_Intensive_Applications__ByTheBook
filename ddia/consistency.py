@@ -989,3 +989,73 @@ class RaftNode(Node):
         self.log.append(Entry(self.term, cmd))
         self.pending[len(self.log) - 1] = (src, rid, self.term)
         self._broadcast_append()
+
+
+class RaftClient(Node):
+    """Client d'une grappe Raft : exécute un script d'opérations l'une après l'autre,
+    cherche le leader (indications NotLeader, essais successifs) et relance après un délai.
+    Chaque opération est enregistrée comme `Op` (registre « x ») pour la vérification."""
+
+    def __init__(self, name: str, servers: Sequence[str], script: Sequence[Tuple] = (), timeout: float = 20.0,
+                 history: List[Op] | None = None, key: str = "x"):
+        super().__init__(name)
+        self.servers = list(servers)
+        self.script = list(script)    # [(délai, "write"/"read"/"cas", argument)]
+        self.timeout, self.key = timeout, key
+        self.history = history if history is not None else []
+        self.guess = 0
+        self.rid = 0
+        self.suspect: Optional[str] = None
+        self.cur: Optional[dict] = None
+
+    def on_start(self):
+        self._next()
+
+    def _next(self):
+        if self.script:
+            delay, kind, arg = self.script.pop(0)
+            self.set_timer(delay, self._begin, kind, arg)
+
+    def _begin(self, kind, arg):
+        self.cur = dict(op=Op(self.name, kind, arg, t_call=self.now), kind=kind, arg=arg)
+        self._try()
+
+    def _try(self):
+        self.rid += 1
+        rid = self.rid
+        self.cur["rid"] = rid
+        kind, arg = self.cur["kind"], self.cur["arg"]
+        dst = self.servers[self.guess % len(self.servers)]
+        if kind == "read":
+            self.send(dst, ("Read", rid, self.key))
+        elif kind == "write":
+            self.send(dst, ("Submit", rid, ("set", self.key, arg)))
+        else:
+            self.send(dst, ("Submit", rid, ("cas", self.key, arg[0], arg[1])))
+        self.set_timer(self.timeout, self._expired, rid)
+
+    def _expired(self, rid):
+        if self.cur and self.cur["rid"] == rid:
+            self.suspect = self.servers[self.guess % len(self.servers)]   # muet : on l'évite
+            self.guess += 1
+            self._try()
+
+    def on_message(self, src, msg):
+        if not self.cur or msg[1] != self.cur["rid"]:
+            return
+        if msg[0] == "NotLeader":
+            hint = msg[2]
+            usable = hint in self.servers and hint != src and hint != self.suspect
+            self.guess = self.servers.index(hint) if usable else self.guess + 1
+            self.set_timer(1.0, self._retry_if, msg[1])
+        elif msg[0] == "Reply":
+            op = self.cur["op"]
+            op.result = "ok" if self.cur["kind"] == "write" else msg[2]
+            op.t_return = self.now
+            self.history.append(op)
+            self.cur = None
+            self._next()
+
+    def _retry_if(self, rid):
+        if self.cur and self.cur["rid"] == rid:
+            self._try()
