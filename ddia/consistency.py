@@ -728,3 +728,264 @@ class PaxosProposer(Node):
                                            ballot=self.ballot, rounds=self.rounds))
                 for p in self.peers:
                     self.send(p, ("decided", self.proposal))
+
+
+def run_paxos(values: Dict[str, Any], n_acceptors: int = 3, starts: Dict[str, float] | None = None,
+              backoff=(2.0, 6.0), latency=(0.5, 1.5), seed: int = 0, until: float = 500.0,
+              crashes: Sequence[Tuple[float, str]] = (), timeout: float = 10.0):
+    """Paxos à une décision : `values` = {proposeur: valeur proposée}. Renvoie
+    (réseau, décisions, proposeurs)."""
+    net = Network(seed=seed, latency=latency)
+    accs = [f"A{i + 1}" for i in range(n_acceptors)]
+    for a in accs:
+        net.add(PaxosAcceptor(a))
+    decisions: List[dict] = []
+    props = {}
+    for p, v in values.items():
+        props[p] = net.add(PaxosProposer(p, accs, v, start=(starts or {}).get(p, 0.0), backoff=backoff,
+                                         timeout=timeout, decisions=decisions, peers=list(values), seed=seed))
+    for t, name in crashes:
+        net.at(t, net.crash, name)
+    net.run(until=until)
+    return net, decisions, props
+
+
+# ------------------------------------------------------------------------- Raft
+
+@dataclass
+class Entry:
+    term: int
+    cmd: Any
+
+
+class RaftNode(Node):
+    """Un nœud Raft (Ongaro et Ousterhout, 2014) sur le simulateur `ddia.sim`.
+
+    Implémente l'élection (mandats, votes, délais aléatoires), la réplication du journal
+    (AppendEntries avec vérification de cohérence et retour arrière), la règle de
+    validation par majorité et la machine à états (un dictionnaire clé-valeur). L'état
+    persistant (mandat, vote, journal) survit aux pannes ; le reste est perdu.
+
+    Paramètres pédagogiques (pour casser l'algorithme) :
+    check_log=False supprime la restriction d'élection (un candidat au journal en retard
+    peut gagner) ; current_term_only=False valide aussi par comptage les entrées d'un
+    mandat précédent ; read_mode="local" fait répondre le leader aux lectures sans
+    consulter de quorum (lectures potentiellement périmées).
+    """
+
+    def __init__(self, name: str, peers: Sequence[str], election_timeout=(15.0, 30.0), heartbeat: float = 5.0,
+                 check_log: bool = True, current_term_only: bool = True, read_mode: str = "log",
+                 trace: List[dict] | None = None, seed: int = 0):
+        super().__init__(name)
+        self.peers = [p for p in peers if p != name]
+        self.cluster = list(peers)
+        self.et, self.hb = election_timeout, heartbeat
+        self.check_log, self.current_term_only, self.read_mode = check_log, current_term_only, read_mode
+        self.trace = trace if trace is not None else []
+        self.rng = random.Random(f"{seed}-{name}")
+        # état persistant
+        self.term = 0
+        self.voted_for: Optional[str] = None
+        self.log: List[Entry] = [Entry(0, None)]
+        self._reset_volatile()
+
+    # ------------------------------------------------------------------ outils
+    def _reset_volatile(self):
+        self.role = "follower"
+        self.leader: Optional[str] = None
+        self.commit = 0
+        self.applied = 0
+        self.kv: Dict[Any, Any] = {}
+        self.votes: set = set()
+        self.next_idx: Dict[str, int] = {}
+        self.match_idx: Dict[str, int] = {}
+        self.pending: Dict[int, Tuple[str, int, int]] = {}
+        self._egen = 0
+        self._hgen = 0
+
+    @property
+    def majority(self) -> int:
+        return len(self.cluster) // 2 + 1
+
+    def _ev(self, kind, **kw):
+        self.trace.append(dict(t=self.now, node=self.name, kind=kind, term=self.term, **kw))
+
+    def _last(self):
+        return len(self.log) - 1, self.log[-1].term
+
+    def _arm_election(self):
+        self._egen += 1
+        g = self._egen
+        self.set_timer(self.rng.uniform(*self.et), self._election_timeout, g)
+
+    def _step_down(self, term):
+        if term > self.term:
+            self.term, self.voted_for = term, None
+        if self.role != "follower":
+            self._ev("step_down")
+        self.role = "follower"
+        self.pending.clear()      # les clients en attente relanceront après leur délai
+        self._hgen += 1
+        self._arm_election()
+
+    # ------------------------------------------------------------- cycle de vie
+    def on_start(self):
+        self._arm_election()
+
+    def on_recover(self):
+        self._reset_volatile()
+        self._ev("recover")
+        self._arm_election()
+
+    def on_crash(self):
+        self._ev("crash")
+
+    # --------------------------------------------------------------- élection
+    def _election_timeout(self, g):
+        if g != self._egen or self.role == "leader":
+            return
+        self.term += 1
+        self.role = "candidate"
+        self.voted_for = self.name
+        self.votes = {self.name}
+        self._ev("candidate")
+        li, lt = self._last()
+        for p in self.peers:
+            self.send(p, ("RequestVote", self.term, self.name, li, lt))
+        self._arm_election()
+        if len(self.votes) >= self.majority:  # grappe d'un seul nœud
+            self._become_leader()
+
+    def _become_leader(self):
+        self.role = "leader"
+        self.leader = self.name
+        self._ev("leader")
+        n = len(self.log)
+        self.next_idx = {p: n for p in self.peers}
+        self.match_idx = {p: 0 for p in self.peers}
+        self.log.append(Entry(self.term, ("noop",)))   # entrée vide du nouveau mandat
+        self._broadcast_append()
+        self._hgen += 1
+        self._heartbeat_loop(self._hgen)
+
+    def _heartbeat_loop(self, g):
+        if g != self._hgen or self.role != "leader":
+            return
+        self._broadcast_append()
+        self.set_timer(self.hb, self._heartbeat_loop, g)
+
+    def _send_append(self, p):
+        ni = self.next_idx[p]
+        prev = ni - 1
+        entries = [(e.term, e.cmd) for e in self.log[ni:]]
+        self.send(p, ("Append", self.term, self.name, prev, self.log[prev].term, entries, self.commit))
+
+    def _broadcast_append(self):
+        for p in self.peers:
+            self._send_append(p)
+
+    # ---------------------------------------------------------------- messages
+    def on_message(self, src, msg):
+        kind = msg[0]
+        if kind in ("Submit", "Read"):
+            return self._client(src, msg)
+        term = msg[1]
+        if term > self.term:
+            self._step_down(term)
+        if kind == "RequestVote":
+            _, t, cand, li, lt = msg
+            my_li, my_lt = self._last()
+            up_to_date = (lt, li) >= (my_lt, my_li)
+            grant = (t == self.term and self.voted_for in (None, cand)
+                     and (up_to_date or not self.check_log))
+            if grant:
+                self.voted_for = cand
+                self._arm_election()
+            self.send(src, ("Vote", self.term, grant))
+        elif kind == "Vote":
+            if self.role == "candidate" and term == self.term and msg[2]:
+                self.votes.add(src)
+                if len(self.votes) >= self.majority:
+                    self._become_leader()
+        elif kind == "Append":
+            _, t, leader, prev, prev_term, entries, lcommit = msg
+            if t < self.term:
+                self.send(src, ("AppendResp", self.term, False, 0))
+                return
+            if self.role != "follower":
+                self._step_down(t)
+            self.leader = leader
+            self._arm_election()
+            if prev >= len(self.log) or self.log[prev].term != prev_term:
+                self.send(src, ("AppendResp", self.term, False, min(prev - 1, len(self.log) - 1)))
+                return
+            for k, (et, cmd) in enumerate(entries):
+                idx = prev + 1 + k
+                if idx < len(self.log) and self.log[idx].term != et:
+                    if idx <= self.commit:
+                        self._ev("truncate_committed", index=idx)
+                    del self.log[idx:]
+                if idx >= len(self.log):
+                    self.log.append(Entry(et, cmd))
+            last_new = prev + len(entries)
+            if lcommit > self.commit:
+                self.commit = min(lcommit, last_new)
+                self._apply()
+            self.send(src, ("AppendResp", self.term, True, last_new))
+        elif kind == "AppendResp":
+            if self.role != "leader" or term != self.term:
+                return
+            ok, idx = msg[2], msg[3]
+            if ok:
+                self.match_idx[src] = max(self.match_idx[src], idx)
+                self.next_idx[src] = self.match_idx[src] + 1
+                self._advance_commit()
+            else:
+                self.next_idx[src] = max(1, min(self.next_idx[src] - 1, idx + 1))
+                self._send_append(src)
+
+    def _advance_commit(self):
+        for n in range(len(self.log) - 1, self.commit, -1):
+            if self.current_term_only and self.log[n].term != self.term:
+                break
+            count = 1 + sum(1 for p in self.peers if self.match_idx[p] >= n)
+            if count >= self.majority:
+                self.commit = n
+                self._ev("commit", index=n)
+                self._apply()
+                self._broadcast_append()   # propage l'indice de validation sans attendre
+                break
+
+    def _apply(self):
+        while self.applied < self.commit:
+            self.applied += 1
+            cmd = self.log[self.applied].cmd
+            result = None
+            if cmd[0] == "set":
+                self.kv[cmd[1]] = cmd[2]
+                result = "ok"
+            elif cmd[0] == "cas":
+                _, k, old, new = cmd
+                result = self.kv.get(k, 0) == old
+                if result:
+                    self.kv[k] = new
+            elif cmd[0] == "read":
+                result = self.kv.get(cmd[1], 0)
+            if self.applied in self.pending:
+                client, rid, term = self.pending.pop(self.applied)
+                if self.log[self.applied].term == term:   # c'est bien l'entrée ajoutée pour ce client
+                    self.send(client, ("Reply", rid, result))
+
+    # ----------------------------------------------------------------- clients
+    def _client(self, src, msg):
+        rid = msg[1]
+        if self.role != "leader":
+            self.send(src, ("NotLeader", rid, self.leader))
+            return
+        if msg[0] == "Read" and self.read_mode == "local":
+            self.send(src, ("Reply", rid, self.kv.get(msg[2], 0)))
+            return
+        cmd = ("read", msg[2]) if msg[0] == "Read" else msg[2]
+        self.log.append(Entry(self.term, cmd))
+        self.pending[len(self.log) - 1] = (src, rid, self.term)
+        self._broadcast_append()
