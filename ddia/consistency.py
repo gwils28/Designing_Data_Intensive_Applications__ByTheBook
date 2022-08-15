@@ -1059,3 +1059,181 @@ class RaftClient(Node):
     def _retry_if(self, rid):
         if self.cur and self.cur["rid"] == rid:
             self._try()
+
+
+def raft_cluster(n: int = 5, seed: int = 0, latency=(1.0, 3.0), election_timeout=(15.0, 30.0),
+                 heartbeat: float = 5.0, overrides: Dict[str, dict] | None = None, **kw):
+    """Crée une grappe Raft de n nœuds (S1..Sn). Renvoie (réseau, {nom: nœud}, trace).
+
+    overrides : paramètres particuliers par nœud (ex. {"S3": {"election_timeout": (40, 41)}})."""
+    net = Network(seed=seed, latency=latency)
+    names = [f"S{i + 1}" for i in range(n)]
+    trace: List[dict] = []
+    nodes = {}
+    for x in names:
+        params = dict(election_timeout=election_timeout, heartbeat=heartbeat, trace=trace, seed=seed, **kw)
+        params.update((overrides or {}).get(x, {}))
+        nodes[x] = net.add(RaftNode(x, names, **params))
+    return net, nodes, trace
+
+
+def raft_leaders(trace: Sequence[dict]) -> List[Tuple[float, str, int]]:
+    """Liste des prises de pouvoir (instant, nœud, mandat)."""
+    return [(e["t"], e["node"], e["term"]) for e in trace if e["kind"] == "leader"]
+
+
+def raft_check_safety(nodes: Dict[str, RaftNode], trace: Sequence[dict]) -> dict:
+    """Vérifie les propriétés de sûreté de Raft sur l'état final et la trace :
+    un seul leader par mandat, préfixes validés identiques sur tous les nœuds, aucune
+    entrée validée effacée."""
+    per_term: Dict[int, set] = {}
+    for _, node, term in raft_leaders(trace):
+        per_term.setdefault(term, set()).add(node)
+    two_leaders = [t for t, s in per_term.items() if len(s) > 1]
+    logs = {x: [(e.term, e.cmd) for e in nd.log[1:nd.commit + 1]] for x, nd in nodes.items()}
+    names = list(logs)
+    divergent = []
+    for i in range(len(names)):
+        for j in range(i + 1, len(names)):
+            a, b = logs[names[i]], logs[names[j]]
+            m = min(len(a), len(b))
+            if a[:m] != b[:m]:
+                divergent.append((names[i], names[j]))
+    truncated = [e for e in trace if e["kind"] == "truncate_committed"]
+    return dict(mandats_a_deux_leaders=two_leaders, journaux_divergents=divergent,
+                entrees_validees_effacees=len(truncated),
+                sur=not two_leaders and not divergent and not truncated)
+
+
+def majority_availability(n: int, p_up: float) -> float:
+    """Probabilité qu'une majorité stricte de n nœuds indépendants soit en vie."""
+    q = n // 2 + 1
+    return sum(math.comb(n, k) * p_up ** k * (1 - p_up) ** (n - k) for k in range(q, n + 1))
+
+
+def quorum_latency(n: int, q: int, samples: int = 20000, sigma: float = 0.5, base: float = 1.0,
+                   local: bool = True, seed: int = 0) -> np.ndarray:
+    """Temps d'attente d'un quorum de q réponses parmi n (aller-retour log-normal) ;
+    local=True : le leader compte sa propre réponse (immédiate)."""
+    rng = np.random.default_rng(seed)
+    m = n - 1 if local else n
+    need = q - 1 if local else q
+    if need <= 0:
+        return np.zeros(samples)
+    rtt = base * rng.lognormal(0.0, sigma, size=(samples, m))
+    return np.sort(rtt, axis=1)[:, need - 1]
+
+
+# =====================================================================================
+# 4. Service de coordination (modèle à la etcd / ZooKeeper)
+# =====================================================================================
+
+class CoordService:
+    """Magasin clé-valeur linéarisable d'un service de coordination, sans le réseau.
+
+    - chaque écriture incrémente une **révision** globale (le zxid de ZooKeeper, la
+      révision d'etcd), utilisable comme jeton de clôture ;
+    - un **bail** (lease) a une durée de vie ; il est prolongé par des battements
+      (keepalive) et, s'il expire, les clés qui lui sont attachées (clés **éphémères**)
+      disparaissent ;
+    - `create` est une écriture conditionnelle (créer si absente) ; `create_sequential`
+      ajoute un suffixe croissant (recette d'élection de ZooKeeper) ;
+    - `watch(prefix ou clé, rappel)` notifie les changements ; on compte les
+      notifications envoyées.
+    Le temps est fourni par l'appelant (paramètre `now`).
+    """
+
+    def __init__(self):
+        self.revision = 0
+        self.data: Dict[str, dict] = {}
+        self.leases: Dict[int, dict] = {}
+        self._next_lease = 1
+        self.watches: List[Tuple[str, bool, Callable, bool]] = []
+        self.notifications = 0
+        self.log: List[Tuple[int, str, str]] = []
+
+    # ------------------------------------------------------------------ baux
+    def grant(self, ttl: float, now: float) -> int:
+        lid = self._next_lease
+        self._next_lease += 1
+        self.leases[lid] = dict(ttl=ttl, deadline=now + ttl, keys=set())
+        return lid
+
+    def keepalive(self, lease: int, now: float) -> bool:
+        self.expire(now)
+        if lease not in self.leases:
+            return False
+        self.leases[lease]["deadline"] = now + self.leases[lease]["ttl"]
+        return True
+
+    def revoke(self, lease: int) -> None:
+        info = self.leases.pop(lease, None)
+        if info:
+            for k in sorted(info["keys"]):
+                if k in self.data:
+                    self._delete(k)
+
+    def expire(self, now: float) -> List[int]:
+        dead = [lid for lid, info in self.leases.items() if info["deadline"] <= now]
+        for lid in dead:
+            self.revoke(lid)
+        return dead
+
+    # -------------------------------------------------------------- écritures
+    def _notify(self, kind: str, key: str):
+        self.log.append((self.revision, kind, key))
+        fired = []
+        for w in list(self.watches):
+            target, is_prefix, cb, once = w
+            if (is_prefix and key.startswith(target)) or (not is_prefix and key == target):
+                fired.append(w)
+        for w in fired:
+            if w[3] and w in self.watches:
+                self.watches.remove(w)
+            self.notifications += 1
+            w[2](kind, key, self.revision)
+
+    def put(self, key: str, value: Any, lease: int | None = None) -> int:
+        self.revision += 1
+        old = self.data.get(key)
+        self.data[key] = dict(value=value, create=old["create"] if old else self.revision,
+                              mod=self.revision, lease=lease)
+        if lease is not None:
+            self.leases[lease]["keys"].add(key)
+        self._notify("put", key)
+        return self.revision
+
+    def create(self, key: str, value: Any, lease: int | None = None) -> Tuple[bool, int]:
+        """Crée la clé si elle n'existe pas (CAS « absente -> valeur »)."""
+        if key in self.data:
+            return False, self.data[key]["create"]
+        return True, self.put(key, value, lease)
+
+    def create_sequential(self, prefix: str, value: Any, lease: int | None = None) -> str:
+        key = f"{prefix}{self.revision + 1:08d}"
+        self.put(key, value, lease)
+        return key
+
+    def _delete(self, key: str):
+        info = self.data.pop(key)
+        if info["lease"] in self.leases:
+            self.leases[info["lease"]]["keys"].discard(key)
+        self.revision += 1
+        self._notify("delete", key)
+
+    def delete(self, key: str) -> bool:
+        if key not in self.data:
+            return False
+        self._delete(key)
+        return True
+
+    # ---------------------------------------------------------------- lectures
+    def get(self, key: str):
+        info = self.data.get(key)
+        return None if info is None else info["value"]
+
+    def keys(self, prefix: str) -> List[str]:
+        return sorted(k for k in self.data if k.startswith(prefix))
+
+    def watch(self, target: str, callback: Callable, prefix: bool = False, once: bool = True) -> None:
+        self.watches.append((target, prefix, callback, once))
