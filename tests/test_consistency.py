@@ -104,3 +104,118 @@ def test_diffusion_a_ordre_total_fait_converger_les_repliques():
     assert len({tuple(r.log) for r in reps}) == 1
     _, reps = cs.run_registry(claims, total_order=False)
     assert len({r.owner["bob"] for r in reps}) > 1
+
+
+def test_raft_elit_un_leader_et_valide():
+    net, nodes, trace = cs.raft_cluster(5, seed=1)
+    hist = []
+    net.add(cs.RaftClient("client", list(nodes), [(60, "write", 1), (2, "cas", (1, 2)), (2, "read", None)],
+                          history=hist))
+    leader0 = None
+
+    def crash_leader():
+        nonlocal leader0
+        leader0 = [x for x, nd in nodes.items() if nd.role == "leader"][0]
+        net.crash(leader0)
+    net.at(120, crash_leader)
+    net.run(until=400)
+    assert len(hist) == 3 and hist[-1].result == 2
+    assert cs.check_linearizable(hist).ok
+    assert cs.raft_check_safety(nodes, trace)["sur"]
+    leaders = cs.raft_leaders(trace)
+    assert len({term for _, _, term in leaders}) == len(leaders)
+
+
+def test_raft_survit_a_une_partition():
+    net, nodes, trace = cs.raft_cluster(5, seed=3)
+    net.run(until=80)
+    leader = [x for x, nd in nodes.items() if nd.role == "leader"][0]
+    others = [x for x in nodes if x != leader]
+    net.partition({leader, others[0]}, set(others[1:]))
+    net.run(until=250)
+    net.heal()
+    net.run(until=400)
+    assert cs.raft_check_safety(nodes, trace)["sur"]
+    assert sum(nd.role == "leader" for nd in nodes.values()) == 1
+    assert nodes[leader].term > 1
+
+
+def test_disponibilite_et_latence_de_quorum():
+    assert abs(cs.majority_availability(3, 0.9) - (0.9 ** 3 + 3 * 0.9 ** 2 * 0.1)) < 1e-12
+    assert cs.majority_availability(5, 0.99) > cs.majority_availability(3, 0.99)
+    lat3 = np.median(cs.quorum_latency(3, 2))
+    lat7 = np.median(cs.quorum_latency(7, 4))
+    assert lat7 > lat3
+
+
+# ------------------------------------------------------------------ coordination
+
+def test_service_de_coordination_bail_et_cle_ephemere():
+    svc = cs.CoordService()
+    events = []
+    lease = svc.grant(5, now=0)
+    ok, rev = svc.create("/lock", "c1", lease)
+    assert ok
+    assert svc.create("/lock", "c2")[0] is False
+    svc.watch("/lock", lambda kind, key, r: events.append((kind, key)))
+    assert svc.keepalive(lease, now=4)
+    svc.expire(now=8)
+    assert svc.get("/lock") == "c1"
+    svc.expire(now=9.5)
+    assert svc.get("/lock") is None and events == [("delete", "/lock")]
+    ok2, rev2 = svc.create("/lock", "c2")
+    assert ok2 and rev2 > rev
+
+
+def test_cles_sequentielles_ordonnees():
+    svc = cs.CoordService()
+    keys = [svc.create_sequential("/election/n-", f"c{i}") for i in range(5)]
+    assert keys == sorted(keys) and svc.keys("/election/") == keys
+
+
+def test_paxos_accord_malgre_pannes():
+    for s in range(30):
+        _, dec, props = cs.run_paxos({"P1": "x", "P2": "y", "P3": "z"}, n_acceptors=5, seed=s,
+                                     crashes=[(2.0, "A1"), (3.0, "A2")])
+        vals = {p.decided for p in props.values()}
+        assert len(vals) == 1 and vals <= {"x", "y", "z"}
+
+
+def test_raft_ecriture_sur_ancien_leader_isole_n_est_pas_confirmee_a_tort():
+    net, nodes, trace = cs.raft_cluster(5, seed=2)
+    hist = []
+    net.run(until=60)
+    old = [x for x, nd in nodes.items() if nd.role == "leader"][0]
+    others = [x for x in nodes if x != old]
+    net.partition({old, others[0]}, set(others[1:]))
+    net.add(cs.RaftClient("a", [old] + others, [(1, "write", 1)], history=hist, timeout=60))
+    net.add(cs.RaftClient("b", others[1:], [(50, "write", 2)], history=hist, timeout=60))
+    net.run(until=140)
+    net.heal()
+    net.run(until=400)
+    assert cs.raft_check_safety(nodes, trace)["sur"]
+    leader = [x for x, nd in nodes.items() if nd.role == "leader"][0]
+    sets = [e.cmd for e in nodes[leader].log[1:nodes[leader].commit + 1] if e.cmd[0] == "set"]
+    # chaque écriture confirmée au client est bien dans le journal validé
+    for op in hist:
+        assert ("set", "x", op.arg) in sets
+
+
+def test_raft_sans_restriction_d_election_perd_une_ecriture():
+    pertes = 0
+    for check in (True, False):
+        net, nodes, trace = cs.raft_cluster(5, seed=0, check_log=check)
+        hist = []
+        net.run(until=60)
+        L = [x for x, nd in nodes.items() if nd.role == "leader"][0]
+        autres = [x for x in nodes if x != L]
+        for x in autres[:2]:
+            net.partition({x}, set(nodes) - {x})
+        net.add(cs.RaftClient("client", [L], [(1, "write", 7)], history=hist, timeout=50))
+        net.run(until=100)
+        net.heal(); net.crash(L)
+        net.run(until=400)
+        s = cs.raft_check_safety(nodes, trace)
+        assert s["sur"] == check
+        pertes += s["entrees_validees_effacees"]
+    assert pertes > 0
