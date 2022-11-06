@@ -132,3 +132,78 @@ def generate_access_log(n_lines: int, n_urls: int = 2000, s: float = 1.1, n_ips:
         lines.append(f'{ip_pool[ip_idx[i]]} - - {ts} "GET {url} HTTP/1.1" {st} {size} '
                      f'"https://example.org/" "{_AGENTS[agents[i]]}"')
     return lines
+
+
+def write_lines(path: str, lines: Iterable[str]) -> int:
+    """Écrit les lignes dans un fichier texte ; renvoie la taille en octets."""
+    with open(path, "w", encoding="utf-8") as f:
+        for line in lines:
+            f.write(line)
+            f.write("\n")
+    return os.path.getsize(path)
+
+
+def url_of(line: str) -> str:
+    """URL demandée : 7e champ séparé par des espaces (indice 6)."""
+    return line.split()[6]
+
+
+def top_k_hash(lines: Iterable[str], k: int = 5, field: int = 6) -> List[Tuple[int, str]]:
+    """Les k valeurs les plus fréquentes du champ `field`, par table de hachage en mémoire.
+
+    En cas d'égalité de compte, l'ordre est celui de `sort -r -n` en locale C (valeur
+    décroissante), pour pouvoir comparer avec le pipeline Unix.
+    """
+    counts: Dict[str, int] = defaultdict(int)
+    for line in lines:
+        counts[line.split()[field]] += 1
+    return sorted(((c, u) for u, c in counts.items()), reverse=True)[:k]
+
+
+def unix_top_k(path: str, k: int = 5, awk_prog: str = "{print $7}",
+               sort_opts: str = "") -> Tuple[List[Tuple[int, str]], float]:
+    """Lance le vrai pipeline Unix du livre sur `path` ; renvoie (résultat, durée en s).
+
+    `sort_opts` est passé au premier `sort` (par ex. "-S 1M" pour borner sa mémoire).
+    La locale C rend le tri déterministe et rapide (comparaison octet par octet).
+    """
+    cmd = (f"cat {path} | awk '{awk_prog}' | sort {sort_opts} | uniq -c | "
+           f"sort -r -n | head -n {k}")
+    env = dict(os.environ, LC_ALL="C")
+    t0 = time.perf_counter()
+    out = subprocess.run(cmd, shell=True, check=True, capture_output=True, text=True, env=env).stdout
+    dt = time.perf_counter() - t0
+    res = []
+    for line in out.strip().splitlines():
+        c, u = line.split(None, 1)
+        res.append((int(c), u))
+    return res, dt
+
+
+# =====================================================================================
+# Tri externe
+# =====================================================================================
+
+@dataclass
+class SortStats:
+    """Bilan d'un tri externe."""
+    n_records: int = 0
+    n_runs: int = 0              # segments triés écrits lors de la première phase
+    merge_passes: int = 0        # passes de fusion (la dernière comprise)
+    max_in_memory: int = 0       # nombre maximal d'éléments gardés en mémoire
+    records_written: int = 0     # éléments écrits sur disque (toutes passes)
+    records_read: int = 0        # éléments relus depuis le disque
+
+
+def merge_passes(n_runs: int, fan_in: int) -> int:
+    """Nombre de passes de fusion pour réduire `n_runs` segments avec `fan_in` voies."""
+    if n_runs <= 1:
+        return 0
+    return math.ceil(math.log(n_runs) / math.log(fan_in) - 1e-12)
+
+
+def _write_run(path: str, items: Sequence[str]) -> None:
+    with open(path, "w", encoding="utf-8") as f:
+        for x in items:
+            f.write(x)
+            f.write("\n")
