@@ -207,3 +207,79 @@ def _write_run(path: str, items: Sequence[str]) -> None:
         for x in items:
             f.write(x)
             f.write("\n")
+
+
+def _read_run(path: str, stats: SortStats) -> Iterator[str]:
+    with open(path, encoding="utf-8") as f:
+        for line in f:
+            stats.records_read += 1
+            yield line[:-1]
+
+
+def external_sort(items: Iterable[str], max_in_memory: int, fan_in: int = 8,
+                  tmpdir: Optional[str] = None) -> Tuple[List[str], SortStats]:
+    """Tri externe de chaînes (sans retour à la ligne) avec au plus `max_in_memory` en RAM.
+
+    Phase 1 : on lit des paquets de `max_in_memory` éléments, on les trie en mémoire et on
+    les écrit comme segments triés (« runs »). Phase 2 : on fusionne au plus `fan_in`
+    segments à la fois (fusion à k voies par tas), en plusieurs passes si nécessaire.
+    Renvoie la liste triée (relue depuis le dernier segment) et les statistiques.
+    """
+    if max_in_memory < 1 or fan_in < 2:
+        raise ValueError("max_in_memory >= 1 et fan_in >= 2")
+    own = tmpdir is None
+    tmpdir = tmpdir or tempfile.mkdtemp(prefix="extsort_")
+    stats = SortStats()
+    runs: List[str] = []
+    buf: List[str] = []
+
+    def flush():
+        buf.sort()
+        p = os.path.join(tmpdir, f"run_{len(runs):05d}.txt")
+        _write_run(p, buf)
+        stats.records_written += len(buf)
+        runs.append(p)
+        buf.clear()
+
+    for x in items:
+        buf.append(x)
+        stats.n_records += 1
+        stats.max_in_memory = max(stats.max_in_memory, len(buf))
+        if len(buf) >= max_in_memory:
+            flush()
+    if buf or not runs:
+        flush()
+    stats.n_runs = len(runs)
+    gen = 0
+    while len(runs) > 1:
+        gen += 1
+        new_runs = []
+        for g in range(0, len(runs), fan_in):
+            group = runs[g:g + fan_in]
+            if len(group) == 1:
+                new_runs.append(group[0])
+                continue
+            p = os.path.join(tmpdir, f"merge_{gen}_{g:05d}.txt")
+            with open(p, "w", encoding="utf-8") as f:
+                for x in heapq.merge(*[_read_run(r, stats) for r in group]):
+                    f.write(x)
+                    f.write("\n")
+                    stats.records_written += 1
+            new_runs.append(p)
+        runs = new_runs
+        stats.merge_passes += 1
+    out = [line[:-1] for line in open(runs[0], encoding="utf-8")]
+    if own:
+        shutil.rmtree(tmpdir, ignore_errors=True)
+    return out, stats
+
+
+def uniq_count(sorted_items: Iterable[Any]) -> Iterator[Tuple[Any, int]]:
+    """Équivalent de `uniq -c` : compte les répétitions **adjacentes** d'un flux trié."""
+    for key, grp in itertools.groupby(sorted_items):
+        yield key, sum(1 for _ in grp)
+
+
+# =====================================================================================
+# Tuyaux et contre-pression
+# =====================================================================================
