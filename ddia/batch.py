@@ -283,3 +283,72 @@ def uniq_count(sorted_items: Iterable[Any]) -> Iterator[Tuple[Any, int]]:
 # =====================================================================================
 # Tuyaux et contre-pression
 # =====================================================================================
+
+def simulate_pipe(produce: Sequence[float], consume: Sequence[float], buffer_size: int) -> Dict[str, np.ndarray]:
+    """Producteur et consommateur reliés par un tampon de `buffer_size` éléments.
+
+    produce[i] : temps pour fabriquer l'élément i ; consume[i] : temps pour le traiter.
+    Le producteur se bloque quand le tampon est plein (contre-pression) ; le consommateur
+    attend quand il est vide. Renvoie les instants de dépôt (`put`), de prise (`take`), de
+    fin de traitement (`done`) et le temps total passé bloqué par le producteur.
+    """
+    n = len(produce)
+    put, take, done = np.zeros(n), np.zeros(n), np.zeros(n)
+    blocked = 0.0
+    t_prod = 0.0
+    for i in range(n):
+        ready = t_prod + produce[i]
+        slot = take[i - buffer_size] if i >= buffer_size else 0.0   # place libérée
+        put[i] = max(ready, slot)
+        blocked += put[i] - ready
+        t_prod = put[i]
+        take[i] = max(put[i], done[i - 1] if i else 0.0)
+        done[i] = take[i] + consume[i]
+    return {"put": put, "take": take, "done": done, "producer_blocked": np.array(blocked)}
+
+
+# =====================================================================================
+# Systèmes de fichiers distribués
+# =====================================================================================
+
+def namenode_memory(total_bytes: float, block_size: float, file_size: float,
+                    bytes_per_object: int = 150) -> float:
+    """Mémoire de métadonnées (octets) : ~150 octets par fichier et par bloc (règle HDFS)."""
+    n_files = total_bytes / file_size
+    blocks_per_file = math.ceil(file_size / block_size)
+    return n_files * (1 + blocks_per_file) * bytes_per_object
+
+
+def rack_of(node: int, nodes_per_rack: int) -> int:
+    return node // nodes_per_rack
+
+
+def place_blocks(n_blocks: int, n_nodes: int, replication: int = 3, nodes_per_rack: int = 10,
+                 seed: int = 0) -> np.ndarray:
+    """Placement des répliques à la HDFS : 1re réplique sur un nœud au hasard, 2e sur un
+    autre rack, 3e sur le même rack que la 2e (autre nœud), suivantes au hasard.
+
+    Renvoie un tableau (n_blocks, replication) d'identifiants de nœuds.
+    """
+    rng = np.random.default_rng(seed)
+    n_racks = math.ceil(n_nodes / nodes_per_rack)
+    out = np.zeros((n_blocks, replication), dtype=int)
+    for b in range(n_blocks):
+        first = int(rng.integers(n_nodes))
+        chosen = [first]
+        if replication >= 2 and n_racks > 1:
+            r1 = rack_of(first, nodes_per_rack)
+            others = [n for n in range(n_nodes) if rack_of(n, nodes_per_rack) != r1]
+            second = int(rng.choice(others))
+            chosen.append(second)
+            if replication >= 3:
+                r2 = rack_of(second, nodes_per_rack)
+                same = [n for n in range(n_nodes) if rack_of(n, nodes_per_rack) == r2 and n not in chosen]
+                if same:
+                    chosen.append(int(rng.choice(same)))
+        while len(chosen) < replication:
+            c = int(rng.integers(n_nodes))
+            if c not in chosen:
+                chosen.append(c)
+        out[b] = chosen
+    return out
