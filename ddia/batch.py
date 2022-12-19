@@ -352,3 +352,153 @@ def place_blocks(n_blocks: int, n_nodes: int, replication: int = 3, nodes_per_ra
                 chosen.append(c)
         out[b] = chosen
     return out
+
+
+def schedule_locality(placement: np.ndarray, n_nodes: int, slots_per_node: int,
+                      busy_fraction: float = 0.0, nodes_per_rack: int = 10, seed: int = 0) -> Dict[str, float]:
+    """Affecte une tâche par bloc en préférant un nœud qui détient une réplique.
+
+    Une fraction `busy_fraction` des emplacements est déjà occupée par d'autres jobs.
+    Renvoie la part de tâches locales au nœud, locales au rack et distantes.
+    """
+    rng = np.random.default_rng(seed)
+    free = np.full(n_nodes, slots_per_node)
+    occupied = rng.random((n_nodes, slots_per_node)) < busy_fraction
+    free -= occupied.sum(axis=1)
+    counts = {"nœud": 0, "rack": 0, "distant": 0}
+    order = rng.permutation(len(placement))
+    for b in order:
+        reps = [int(r) for r in placement[b] if free[r] > 0]
+        if reps:
+            free[reps[0]] -= 1
+            counts["nœud"] += 1
+            continue
+        racks = {rack_of(int(r), nodes_per_rack) for r in placement[b]}
+        cands = [n for n in range(n_nodes) if free[n] > 0 and rack_of(n, nodes_per_rack) in racks]
+        if cands:
+            free[cands[0]] -= 1
+            counts["rack"] += 1
+            continue
+        cands = np.flatnonzero(free > 0)
+        if len(cands):
+            free[cands[0]] -= 1
+        counts["distant"] += 1          # (ou en attente si le cluster est plein)
+    tot = sum(counts.values())
+    return {k: v / tot for k, v in counts.items()}
+
+
+def xor_parity(blocks: Sequence[bytes]) -> bytes:
+    """Bloc de parité : XOR octet à octet de blocs de même taille (RAID 5, code (k, 1))."""
+    arr = np.frombuffer(blocks[0], dtype=np.uint8).copy()
+    for b in blocks[1:]:
+        arr ^= np.frombuffer(b, dtype=np.uint8)
+    return arr.tobytes()
+
+
+def xor_recover(surviving: Sequence[bytes], parity: bytes) -> bytes:
+    """Reconstruit l'unique bloc manquant à partir des survivants et de la parité."""
+    return xor_parity(list(surviving) + [parity])
+
+
+def p_loss_replication(p: float, r: int) -> float:
+    """Probabilité de perdre un bloc à r copies si chaque copie est perdue avec proba p
+    (indépendamment) avant d'avoir été réparée."""
+    return p ** r
+
+
+def p_loss_erasure(p: float, k: int, m: int) -> float:
+    """Code d'effacement (k données + m parités) : perte si plus de m fragments sur k+m."""
+    n = k + m
+    return float(sum(math.comb(n, i) * p ** i * (1 - p) ** (n - i) for i in range(m + 1, n + 1)))
+
+
+# =====================================================================================
+# Workflows de jobs et pannes
+# =====================================================================================
+
+class Workflow:
+    """DAG de jobs : chaque job a une durée et des dépendances (jobs dont il lit la sortie)."""
+
+    def __init__(self):
+        self.duration: Dict[str, float] = {}
+        self.deps: Dict[str, List[str]] = {}
+
+    def add(self, name: str, duration: float, deps: Sequence[str] = ()) -> "Workflow":
+        for d in deps:
+            if d not in self.duration:
+                raise ValueError(f"dépendance inconnue : {d}")
+        self.duration[name] = float(duration)
+        self.deps[name] = list(deps)
+        return self
+
+    def topo_order(self) -> List[str]:
+        """Ordre topologique (algorithme de Kahn, stable dans l'ordre d'ajout)."""
+        indeg = {j: len(d) for j, d in self.deps.items()}
+        children = defaultdict(list)
+        for j, ds in self.deps.items():
+            for d in ds:
+                children[d].append(j)
+        ready = [j for j in self.duration if indeg[j] == 0]
+        out = []
+        while ready:
+            j = ready.pop(0)
+            out.append(j)
+            for c in children[j]:
+                indeg[c] -= 1
+                if indeg[c] == 0:
+                    ready.append(c)
+        if len(out) != len(self.duration):
+            raise ValueError("le graphe contient un cycle")
+        return out
+
+    def downstream(self, job: str) -> List[str]:
+        """Jobs qui dépendent (directement ou non) de `job`."""
+        res, todo = [], [job]
+        while todo:
+            x = todo.pop()
+            for j, ds in self.deps.items():
+                if x in ds and j not in res:
+                    res.append(j)
+                    todo.append(j)
+        return [j for j in self.topo_order() if j in res]
+
+    def schedule(self, slots: Optional[int] = None, attempts: Optional[Dict[str, int]] = None,
+                 retry_delay: float = 0.0) -> List[Dict[str, Any]]:
+        """Simule l'exécution : un job démarre quand toutes ses entrées existent et qu'un
+        emplacement est libre. `attempts[j]` = nombre d'échecs avant succès (chaque échec
+        consomme toute la durée du job, puis `retry_delay`).
+
+        Renvoie une ligne par tentative : job, tentative, début, fin, succès.
+        """
+        attempts = attempts or {}
+        slots = slots or len(self.duration)
+        finish: Dict[str, float] = {}
+        running: List[Tuple[float, str]] = []        # (fin, job)
+        free_at = [0.0] * slots
+        rows = []
+        for j in self.topo_order():
+            # simple ordonnancement de liste : l'ordre topologique est la priorité
+            ready = max([finish[d] for d in self.deps[j]], default=0.0)
+            k = int(np.argmin(free_at))
+            t = max(ready, free_at[k])
+            for a in range(attempts.get(j, 0)):
+                rows.append(dict(job=j, tentative=a + 1, debut=t, fin=t + self.duration[j], succes=False))
+                t += self.duration[j] + retry_delay
+            rows.append(dict(job=j, tentative=attempts.get(j, 0) + 1, debut=t,
+                             fin=t + self.duration[j], succes=True))
+            finish[j] = t + self.duration[j]
+            free_at[k] = finish[j]
+        return rows
+
+    def critical_path(self) -> Tuple[List[str], float]:
+        """Plus long chemin du DAG (durée minimale du workflow avec slots illimités)."""
+        best: Dict[str, Tuple[float, Optional[str]]] = {}
+        for j in self.topo_order():
+            prev = max(((best[d][0], d) for d in self.deps[j]), default=(0.0, None))
+            best[j] = (prev[0] + self.duration[j], prev[1])
+        end = max(best, key=lambda j: best[j][0])
+        path, x = [], end
+        while x is not None:
+            path.append(x)
+            x = best[x][1]
+        return path[::-1], best[end][0]
