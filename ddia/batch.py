@@ -502,3 +502,86 @@ class Workflow:
             path.append(x)
             x = best[x][1]
         return path[::-1], best[end][0]
+
+
+def expected_time_with_restarts(T: float, rate: float) -> float:
+    """Durée moyenne d'une tâche de durée T relancée depuis le début à chaque interruption,
+    les interruptions formant un processus de Poisson de taux `rate` : (e^{rate T} - 1)/rate."""
+    if rate == 0:
+        return T
+    return math.expm1(rate * T) / rate
+
+
+def simulate_restarts(T: float, rate: float, n: int, seed: int = 0) -> np.ndarray:
+    """Durées observées de `n` tâches de durée T sous interruptions de Poisson."""
+    rng = np.random.default_rng(seed)
+    out = np.zeros(n)
+    for i in range(n):
+        total = 0.0
+        while True:
+            x = rng.exponential(1 / rate) if rate > 0 else math.inf
+            if x >= T:
+                total += T
+                break
+            total += x
+        out[i] = total
+    return out
+
+
+def simulate_job(work: float, n_tasks: int, workers: int, rate: float, overhead: float = 0.0,
+                 seed: int = 0) -> float:
+    """Durée d'un job : `work` (heures de calcul) découpé en `n_tasks` tâches égales,
+    exécutées sur `workers` emplacements, chaque tâche relancée si elle est interrompue
+    (taux `rate` par heure) ; `overhead` = coût fixe de démarrage par tentative."""
+    rng = np.random.default_rng(seed)
+    T = work / n_tasks
+    heap = [0.0] * workers
+    for _ in range(n_tasks):
+        t = heapq.heappop(heap)
+        while True:
+            x = rng.exponential(1 / rate) if rate > 0 else math.inf
+            if x >= T + overhead:
+                t += T + overhead
+                break
+            t += x
+        heapq.heappush(heap, t)
+    return max(heap)
+
+
+# =====================================================================================
+# MapReduce miniature
+# =====================================================================================
+
+def stable_hash(key: Any) -> int:
+    """Hachage déterministe d'une clé (indépendant de PYTHONHASHSEED et du processus)."""
+    return zlib.crc32(json.dumps(key, sort_keys=True).encode("utf-8"))
+
+
+def partition_of(key: Any, n: int) -> int:
+    return stable_hash(key) % n
+
+
+def _tuplify(x: Any) -> Any:
+    if isinstance(x, list):
+        return tuple(_tuplify(v) for v in x)
+    return x
+
+
+@dataclass
+class MRStats:
+    """Compteurs d'un job MapReduce (comme les compteurs de Hadoop)."""
+    map_tasks: int = 0
+    reduce_tasks: int = 0
+    map_input_records: int = 0
+    map_output_records: int = 0
+    combine_output_records: int = 0
+    shuffle_records: int = 0
+    shuffle_bytes: int = 0
+    reduce_groups: int = 0
+    reduce_output_records: int = 0
+    spill_files: int = 0
+    records_per_reducer: List[int] = field(default_factory=list)
+
+
+# État partagé avec les processus fils (hérité par fork : rien à sérialiser)
+_JOB: Dict[str, Any] = {}
