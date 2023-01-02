@@ -798,3 +798,105 @@ def partitioned_hash_join(big_shards: Sequence[Sequence[Dict]], small_shards: Se
             for u in table.get(e[key], ()):
                 out.append((e, u))
     return out, {"enregistrements_diffuses": 0, "enregistrements_shuffles": 0, "table_par_mappeur": biggest}
+
+
+def join_network_cost(big: float, small: float, workers: int, strategy: str) -> float:
+    """Volume réseau (en unités de taille) d'une jointure distribuée sur `workers` machines.
+
+    - "shuffle" (tri-fusion côté reduce) : les deux côtés traversent le réseau, sauf la
+      fraction 1/workers qui reste sur place ;
+    - "broadcast" : le petit côté est copié sur chacune des autres machines ;
+    - "copartitioned" : rien ne bouge (entrées déjà partitionnées pareil).
+    """
+    if strategy == "shuffle":
+        return (big + small) * (1 - 1 / workers)
+    if strategy == "broadcast":
+        return small * (workers - 1)
+    if strategy == "copartitioned":
+        return 0.0
+    raise ValueError(strategy)
+
+
+# =====================================================================================
+# Asymétrie (skew)
+# =====================================================================================
+
+def zipf_keys(n: int, n_keys: int, s: float = 1.0, seed: int = 0) -> np.ndarray:
+    """`n` clés tirées parmi `n_keys` selon une loi de Zipf (clé 0 = la plus chaude)."""
+    rng = np.random.default_rng(seed)
+    return rng.choice(n_keys, size=n, p=zipf_weights(n_keys, s))
+
+
+def reducer_loads(keys: Sequence[int], n_reducers: int) -> np.ndarray:
+    """Nombre d'enregistrements reçus par chaque réducteur (partitionnement par hachage)."""
+    loads = np.zeros(n_reducers, dtype=int)
+    uniq, cnt = np.unique(np.asarray(keys), return_counts=True)
+    for k, c in zip(uniq, cnt):
+        loads[partition_of(int(k), n_reducers)] += c
+    return loads
+
+
+def salted_loads(keys: Sequence[int], n_reducers: int, hot: Iterable[int], salt: int,
+                 seed: int = 0) -> np.ndarray:
+    """Charge des réducteurs quand chaque clé chaude est éclatée en `salt` sous-clés
+    (clé, i) avec i tiré au hasard ; les autres clés sont inchangées."""
+    rng = np.random.default_rng(seed)
+    hot = set(int(h) for h in hot)
+    loads = np.zeros(n_reducers, dtype=int)
+    uniq, counts = np.unique(np.asarray(keys), return_counts=True)
+    for k, c in zip(uniq, counts):
+        c = int(c)
+        if int(k) in hot:
+            sub = rng.integers(0, salt, size=c)
+            for i, ci in zip(*np.unique(sub, return_counts=True)):
+                loads[partition_of([int(k), int(i)], n_reducers)] += ci
+        else:
+            loads[partition_of(int(k), n_reducers)] += c
+    return loads
+
+
+# =====================================================================================
+# Moteur dataflow miniature
+# =====================================================================================
+
+class Engine:
+    """Exécute des `Dataset` et tient les compteurs.
+
+    - `fuse=True` : les opérateurs étroits successifs (map, filter...) forment une seule
+      tâche par partition, sans écriture intermédiaire (moteur dataflow) ;
+    - `fuse=False` : chaque opérateur est un job séparé dont la sortie est **matérialisée**
+      (comptée dans `materialized`, multipliée par la réplication du DFS), comme une
+      chaîne de jobs MapReduce.
+
+    Les sorties de shuffle sont gardées en mémoire (`shuffle_store`) ; `lose()` en
+    efface une partition pour simuler la perte d'une machine, et le lignage permet de
+    recalculer seulement ce qui manque.
+    """
+
+    def __init__(self, fuse: bool = True, dfs_replication: int = 3):
+        self.fuse = fuse
+        self.dfs_replication = dfs_replication
+        self.shuffle_store: Dict[int, Dict[int, List[Any]]] = {}
+        self.materialized_store: Dict[Tuple[int, int], List[Any]] = {}
+        self.reset_counters()
+
+    def reset_counters(self) -> None:
+        self.tasks = 0                 # tâches : (étape, partition) si fusion, (opérateur, partition) sinon
+        self.records_processed = 0     # enregistrements traités par les opérateurs
+        self.shuffled = 0              # enregistrements passés par un shuffle
+        self.materialized = 0          # enregistrements écrits sur le DFS (× réplication)
+        self.recomputed: List[Tuple[str, int]] = []
+
+    def lose(self, ds: "Dataset", part: int) -> None:
+        """Perte d'une partition de sortie de shuffle (ou matérialisée) de `ds`."""
+        if ds.id in self.shuffle_store:
+            self.shuffle_store[ds.id].pop(part, None)
+        self.materialized_store.pop((ds.id, part), None)
+
+    def collect(self, ds: "Dataset") -> List[Any]:
+        out = []
+        for p in range(ds.n_parts):
+            out.extend(ds._compute(self, p))
+        if self.fuse:
+            self.tasks += count_fused_tasks(ds)
+        return out
