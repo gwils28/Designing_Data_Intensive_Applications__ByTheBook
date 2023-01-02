@@ -709,3 +709,92 @@ def run_mapreduce(inputs: Sequence[Sequence[Any]], mapper: Callable[[Any], Itera
 # =====================================================================================
 # Utilisateurs, événements et jointures
 # =====================================================================================
+
+def make_users(n: int, seed: int = 0) -> List[Dict[str, Any]]:
+    """Base d'utilisateurs : identifiant, année de naissance, pays."""
+    rng = np.random.default_rng(seed)
+    years = np.clip(rng.normal(1988, 13, n).round(), 1940, 2010).astype(int)
+    countries = rng.choice(["FR", "DE", "US", "BR", "IN", "JP"], size=n, p=[.3, .15, .25, .1, .12, .08])
+    return [{"user_id": i, "birth": int(years[i]), "country": str(countries[i])} for i in range(n)]
+
+
+def make_events(n: int, n_users: int, n_urls: int = 200, s_user: float = 0.0, s_url: float = 1.0,
+                seed: int = 0) -> List[Dict[str, Any]]:
+    """Événements d'activité (pages vues) : utilisateur, URL, horodatage.
+
+    `s_user` > 0 rend l'activité asymétrique (quelques utilisateurs très actifs) ; l'âge
+    influe un peu sur les pages consultées, pour que la jointure ait quelque chose à montrer.
+    """
+    rng = np.random.default_rng(seed)
+    if s_user > 0:
+        users = rng.choice(n_users, size=n, p=zipf_weights(n_users, s_user))
+        users = rng.permutation(n_users)[users]
+    else:
+        users = rng.integers(0, n_users, size=n)
+    url_rank = rng.choice(n_urls, size=n, p=zipf_weights(n_urls, s_url))
+    ts = np.sort(rng.integers(1_668_470_400, 1_668_470_400 + 7 * 86400, size=n))
+    return [{"user_id": int(users[i]), "url": f"/page/{int(url_rank[i])}", "ts": int(ts[i])}
+            for i in range(n)]
+
+
+def sort_merge_join(left: Sequence[Dict], right: Sequence[Dict], key: str) -> List[Tuple[Dict, Dict]]:
+    """Jointure interne par tri-fusion : on trie les deux côtés puis on avance en parallèle."""
+    L = sorted(left, key=lambda r: r[key])
+    R = sorted(right, key=lambda r: r[key])
+    i = j = 0
+    out = []
+    while i < len(L) and j < len(R):
+        a, b = L[i][key], R[j][key]
+        if a < b:
+            i += 1
+        elif a > b:
+            j += 1
+        else:
+            j0 = j
+            while j < len(R) and R[j][key] == a:
+                j += 1
+            while i < len(L) and L[i][key] == a:
+                for jj in range(j0, j):
+                    out.append((L[i], R[jj]))
+                i += 1
+    return out
+
+
+def broadcast_hash_join(big_shards: Sequence[Sequence[Dict]], small: Sequence[Dict],
+                        key: str) -> Tuple[List[Tuple[Dict, Dict]], Dict[str, int]]:
+    """Jointure par hachage diffusé : chaque mappeur charge **tout** le petit côté dans une
+    table de hachage et parcourt son shard du grand côté. Aucun shuffle du grand côté."""
+    out = []
+    table: Dict[Any, List[Dict]] = defaultdict(list)
+    for r in small:
+        table[r[key]].append(r)
+    for shard in big_shards:
+        for e in shard:
+            for u in table.get(e[key], ()):
+                out.append((e, u))
+    stats = {"enregistrements_diffuses": len(small) * len(big_shards), "enregistrements_shuffles": 0,
+             "table_par_mappeur": len(small)}
+    return out, stats
+
+
+def partitioned_hash_join(big_shards: Sequence[Sequence[Dict]], small_shards: Sequence[Sequence[Dict]],
+                          key: str) -> Tuple[List[Tuple[Dict, Dict]], Dict[str, int]]:
+    """Jointure par hachage partitionné : les deux côtés sont **déjà** partitionnés de la même
+    façon (même fonction, même nombre de partitions) ; le mappeur i ne charge que la
+    partition i du petit côté. Vérifie la condition de co-partitionnement."""
+    if len(big_shards) != len(small_shards):
+        raise ValueError("les deux entrées doivent avoir le même nombre de partitions")
+    n = len(big_shards)
+    out = []
+    biggest = 0
+    for i in range(n):
+        table: Dict[Any, List[Dict]] = defaultdict(list)
+        for r in small_shards[i]:
+            if partition_of(r[key], n) != i:
+                raise ValueError("entrées non co-partitionnées")
+            table[r[key]].append(r)
+        biggest = max(biggest, len(small_shards[i]))
+        for e in big_shards[i]:
+            for u in table.get(e[key], ()):
+                out.append((e, u))
+    return out, {"enregistrements_diffuses": 0, "enregistrements_shuffles": 0, "table_par_mappeur": biggest}
