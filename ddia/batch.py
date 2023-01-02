@@ -585,3 +585,127 @@ class MRStats:
 
 # État partagé avec les processus fils (hérité par fork : rien à sérialiser)
 _JOB: Dict[str, Any] = {}
+
+
+def _map_task(i: int) -> Dict[str, int]:
+    job = _JOB
+    mapper, combiner, nred = job["mapper"], job["combiner"], job["n_reducers"]
+    part = job["partitioner"]
+    buckets: List[List[Tuple[Any, Any]]] = [[] for _ in range(nred)]
+    n_in = n_out = 0
+    for rec in job["inputs"][i]:
+        n_in += 1
+        for k, v in mapper(rec):
+            n_out += 1
+            buckets[part(job["group_by"](k), nred)].append((k, v))
+    n_comb = 0
+    sizes = []
+    for r, b in enumerate(buckets):
+        b.sort(key=lambda kv: kv[0])
+        if combiner is not None:
+            comb = []
+            for k, grp in itertools.groupby(b, key=lambda kv: kv[0]):
+                for v in combiner(k, (v for _, v in grp)):
+                    comb.append((k, v))
+            b = comb
+        n_comb += len(b)
+        path = os.path.join(job["workdir"], f"m{i + 1}_r{r + 1}.jsonl")
+        with open(path, "w", encoding="utf-8") as f:
+            for k, v in b:
+                f.write(json.dumps([k, v]))
+                f.write("\n")
+        sizes.append(os.path.getsize(path))
+    return {"in": n_in, "out": n_out, "comb": n_comb, "bytes": sum(sizes)}
+
+
+def _read_shuffle(path: str) -> Iterator[Tuple[Any, Any]]:
+    with open(path, encoding="utf-8") as f:
+        for line in f:
+            k, v = json.loads(line)
+            yield _tuplify(k), _tuplify(v)
+
+
+def _reduce_task(r: int) -> Dict[str, int]:
+    job = _JOB
+    files = [os.path.join(job["workdir"], f"m{i + 1}_r{r + 1}.jsonl") for i in range(len(job["inputs"]))]
+    merged = heapq.merge(*[_read_shuffle(p) for p in files], key=lambda kv: kv[0])
+    gb = job["group_by"]
+    n_rec = n_groups = n_out = 0
+    out_path = os.path.join(job["workdir"], f"r{r + 1}.jsonl")
+    counter = [0]
+
+    def values(grp):
+        for _, v in grp:
+            counter[0] += 1
+            yield v
+
+    with open(out_path, "w", encoding="utf-8") as f:
+        for gk, grp in itertools.groupby(merged, key=lambda kv: gb(kv[0])):
+            n_groups += 1
+            for out in job["reducer"](gk, values(grp)):
+                n_out += 1
+                f.write(json.dumps(out))
+                f.write("\n")
+    n_rec = counter[0]
+    return {"records": n_rec, "groups": n_groups, "out": n_out}
+
+
+def run_mapreduce(inputs: Sequence[Sequence[Any]], mapper: Callable[[Any], Iterable[Tuple[Any, Any]]],
+                  reducer: Callable[[Any, Iterator[Any]], Iterable[Any]], n_reducers: int = 3,
+                  combiner: Optional[Callable[[Any, Iterator[Any]], Iterable[Any]]] = None,
+                  group_by: Optional[Callable[[Any], Any]] = None,
+                  partitioner: Callable[[Any, int], int] = partition_of,
+                  processes: int = 1, workdir: Optional[str] = None,
+                  keep_files: bool = False) -> Tuple[List[List[Any]], MRStats]:
+    """Exécute un job MapReduce sur des entrées shardées (`inputs[i]` = shard du mappeur i).
+
+    - `mapper(record)` produit des couples (clé, valeur) ;
+    - chaque mappeur écrit, pour chaque réducteur r, un fichier `m{i}_r{r}.jsonl` **trié
+      par clé** (après combinaison locale si `combiner` est fourni) ;
+    - chaque réducteur fusionne ses fichiers (fusion à k voies) et appelle
+      `reducer(clé_de_groupe, itérateur_de_valeurs)` une fois par groupe ;
+    - `group_by(clé)` (tri secondaire) : on trie sur la clé complète mais on groupe et on
+      partitionne sur `group_by(clé)` (par défaut la clé elle-même) ;
+    - `processes > 1` : mappeurs puis réducteurs en parallèle (multiprocessing, fork).
+
+    Les clés et valeurs doivent être sérialisables en JSON (les tuples redeviennent des
+    tuples à la lecture). Renvoie les sorties de chaque réducteur et les compteurs.
+    """
+    own = workdir is None
+    workdir = workdir or tempfile.mkdtemp(prefix="mapreduce_")
+    os.makedirs(workdir, exist_ok=True)
+    _JOB.clear()
+    _JOB.update(inputs=inputs, mapper=mapper, reducer=reducer, combiner=combiner,
+                n_reducers=n_reducers, group_by=group_by or (lambda k: k),
+                partitioner=partitioner, workdir=workdir)
+    if processes > 1:
+        ctx = multiprocessing.get_context("fork")
+        with ctx.Pool(processes) as pool:
+            mstats = pool.map(_map_task, range(len(inputs)))
+            rstats = pool.map(_reduce_task, range(n_reducers))
+    else:
+        mstats = [_map_task(i) for i in range(len(inputs))]
+        rstats = [_reduce_task(r) for r in range(n_reducers)]
+    outputs = []
+    for r in range(n_reducers):
+        with open(os.path.join(workdir, f"r{r + 1}.jsonl"), encoding="utf-8") as f:
+            outputs.append([_tuplify(json.loads(line)) for line in f])
+    st = MRStats(map_tasks=len(inputs), reduce_tasks=n_reducers,
+                 map_input_records=sum(m["in"] for m in mstats),
+                 map_output_records=sum(m["out"] for m in mstats),
+                 combine_output_records=sum(m["comb"] for m in mstats),
+                 shuffle_records=sum(m["comb"] for m in mstats),
+                 shuffle_bytes=sum(m["bytes"] for m in mstats),
+                 reduce_groups=sum(r["groups"] for r in rstats),
+                 reduce_output_records=sum(r["out"] for r in rstats),
+                 spill_files=len(inputs) * n_reducers,
+                 records_per_reducer=[r["records"] for r in rstats])
+    _JOB.clear()
+    if own and not keep_files:
+        shutil.rmtree(workdir, ignore_errors=True)
+    return outputs, st
+
+
+# =====================================================================================
+# Utilisateurs, événements et jointures
+# =====================================================================================
