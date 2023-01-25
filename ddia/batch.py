@@ -1058,3 +1058,73 @@ class Dataset:
             eng.materialized += len(recs) * eng.dfs_replication
             eng.materialized_store[(self.id, p)] = recs
         return recs
+
+
+def count_fused_tasks(ds: Dataset) -> int:
+    """Nombre de tâches d'un plan fusionné : une par partition et par étape (hors source pure)."""
+    n = 0
+    for st in ds.stages():
+        if st[0].kind == "source" and len(st) == 1:
+            continue
+        n += st[0].n_parts
+    return n
+
+
+__all__.append("count_fused_tasks")
+
+
+# =====================================================================================
+# Pregel (bulk synchronous parallel)
+# =====================================================================================
+
+def pregel(values: Dict[Any, Any], edges: Dict[Any, List[Any]],
+           compute: Callable[[Any, Any, List[Any], int, List[Any]], Tuple[Any, List[Tuple[Any, Any]], bool]],
+           max_supersteps: int = 50, initial_messages: Optional[Dict[Any, List[Any]]] = None
+           ) -> Tuple[Dict[Any, Any], List[Dict[str, int]]]:
+    """Modèle de calcul de Pregel : à chaque super-étape, chaque sommet actif (ou qui a reçu
+    un message) appelle `compute(sommet, valeur, messages, super_étape, voisins)` qui renvoie
+    (nouvelle valeur, messages à envoyer [(dest, msg)], vote d'arrêt). Les messages envoyés
+    à l'étape s ne sont livrés qu'à l'étape s+1 (barrière de synchronisation).
+
+    Renvoie les valeurs finales et, par super-étape, le nombre de sommets actifs et de messages.
+    """
+    vals = dict(values)
+    inbox: Dict[Any, List[Any]] = defaultdict(list, {k: list(v) for k, v in (initial_messages or {}).items()})
+    active = {v: True for v in vals}
+    history = []
+    for step in range(max_supersteps):
+        outbox: Dict[Any, List[Any]] = defaultdict(list)
+        n_active = n_msgs = 0
+        for v in vals:
+            msgs = inbox.get(v, [])
+            if not active[v] and not msgs:
+                continue
+            n_active += 1
+            new, out, halt = compute(v, vals[v], msgs, step, edges.get(v, []))
+            vals[v] = new
+            active[v] = not halt
+            for dst, m in out:
+                outbox[dst].append(m)
+                n_msgs += 1
+        history.append({"super_etape": step, "sommets_actifs": n_active, "messages": n_msgs})
+        inbox = outbox
+        if n_msgs == 0 and not any(active.values()):
+            break
+    return vals, history
+
+
+def pagerank_pregel(edges: Dict[Any, List[Any]], damping: float = 0.85, n_iter: int = 30
+                    ) -> Tuple[Dict[Any, float], List[Dict[str, int]]]:
+    """PageRank en Pregel : chaque sommet envoie rang / degré sortant à ses voisins."""
+    nodes = set(edges) | {d for ds in edges.values() for d in ds}
+    N = len(nodes)
+    edges = {v: list(edges.get(v, [])) for v in nodes}
+
+    def compute(v, rank, msgs, step, out):
+        if step > 0:
+            rank = (1 - damping) / N + damping * sum(msgs)
+        if step < n_iter and out:
+            return rank, [(d, rank / len(out)) for d in out], False
+        return rank, [], step >= n_iter
+
+    return pregel({v: 1.0 / N for v in nodes}, edges, compute, max_supersteps=n_iter + 1)
