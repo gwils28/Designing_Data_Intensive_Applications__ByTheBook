@@ -900,3 +900,161 @@ class Engine:
         if self.fuse:
             self.tasks += count_fused_tasks(ds)
         return out
+
+
+class Dataset:
+    """Collection partitionnée paresseuse : les opérations construisent un graphe (DAG)
+    d'opérateurs, exécuté seulement par `Engine.collect`.
+
+    Opérateurs étroits (chaque partition de sortie ne dépend que d'une partition
+    d'entrée) : `map`, `filter`, `flat_map`. Opérateurs larges (shuffle) :
+    `reduce_by_key`, `group_by_key`, `join`. Les enregistrements des opérations par clé
+    sont des couples (clé, valeur).
+    """
+
+    _next_id = 0
+
+    def __init__(self, kind: str, parents: Sequence["Dataset"], n_parts: int, fn: Any = None,
+                 name: str = "", data: Optional[List[List[Any]]] = None):
+        self.kind, self.parents, self.n_parts, self.fn, self.data = kind, list(parents), n_parts, fn, data
+        Dataset._next_id += 1
+        self.id = Dataset._next_id
+        self.name = name or kind
+
+    # ------------------------------------------------------------ construction
+    @staticmethod
+    def source(shards: Sequence[Sequence[Any]], name: str = "source") -> "Dataset":
+        return Dataset("source", [], len(shards), data=[list(s) for s in shards], name=name)
+
+    def map(self, f: Callable, name: str = "map") -> "Dataset":
+        return Dataset("map", [self], self.n_parts, f, name)
+
+    def filter(self, f: Callable, name: str = "filter") -> "Dataset":
+        return Dataset("filter", [self], self.n_parts, f, name)
+
+    def flat_map(self, f: Callable, name: str = "flat_map") -> "Dataset":
+        return Dataset("flat_map", [self], self.n_parts, f, name)
+
+    def reduce_by_key(self, f: Callable, n_parts: Optional[int] = None, name: str = "reduce_by_key") -> "Dataset":
+        return Dataset("reduce_by_key", [self], n_parts or self.n_parts, f, name)
+
+    def group_by_key(self, n_parts: Optional[int] = None, name: str = "group_by_key") -> "Dataset":
+        return Dataset("group_by_key", [self], n_parts or self.n_parts, None, name)
+
+    def join(self, other: "Dataset", n_parts: Optional[int] = None, name: str = "join") -> "Dataset":
+        return Dataset("join", [self, other], n_parts or self.n_parts, None, name)
+
+    @property
+    def wide(self) -> bool:
+        return self.kind in ("reduce_by_key", "group_by_key", "join")
+
+    # ------------------------------------------------------------ plan
+    def lineage(self) -> List["Dataset"]:
+        """Tous les opérateurs du DAG, dans un ordre topologique."""
+        seen, order = set(), []
+
+        def visit(d):
+            if d.id in seen:
+                return
+            seen.add(d.id)
+            for p in d.parents:
+                visit(p)
+            order.append(d)
+        visit(self)
+        return order
+
+    def stages(self) -> List[List["Dataset"]]:
+        """Découpe en étapes : une étape = une chaîne d'opérateurs étroits terminée par un
+        opérateur large (ou par la sortie). C'est ce que fait la fusion des opérateurs."""
+        stages: Dict[int, List[Dataset]] = {}
+        stage_of: Dict[int, int] = {}
+        for d in self.lineage():
+            if d.kind == "source" or d.wide:
+                sid = len(stages)
+                stages[sid] = [d]
+            else:
+                sid = stage_of[d.parents[0].id]
+                stages[sid].append(d)
+            stage_of[d.id] = sid
+        return [v for _, v in sorted(stages.items())]
+
+    def explain(self) -> str:
+        lines = []
+        for i, st in enumerate(self.stages()):
+            ops = " -> ".join(d.name for d in st)
+            dep = ""
+            if st[0].wide:
+                dep = "  (shuffle depuis " + ", ".join(p.name for p in st[0].parents) + ")"
+            lines.append(f"étape {i + 1} [{st[0].n_parts} partitions] : {ops}{dep}")
+        return "\n".join(lines)
+
+    # ------------------------------------------------------------ exécution
+    def _narrow(self, recs: List[Any]) -> List[Any]:
+        if self.kind == "map":
+            return [self.fn(r) for r in recs]
+        if self.kind == "filter":
+            return [r for r in recs if self.fn(r)]
+        if self.kind == "flat_map":
+            return [x for r in recs for x in self.fn(r)]
+        raise ValueError(self.kind)
+
+    def _shuffle_input(self, eng: Engine, parent: "Dataset", tag: Optional[int]) -> Dict[int, List[Any]]:
+        """Sortie de la phase « map » du shuffle de `parent` vers self (calculée une fois,
+        recalculée seulement pour les partitions perdues)."""
+        key = parent.id * 1000 + self.id
+        store = eng.shuffle_store.setdefault(key, {})
+        if len(store) < self.n_parts or not all(p in store for p in range(self.n_parts)):
+            missing = [p for p in range(self.n_parts) if p not in store]
+            if store:   # recalcul partiel après une perte
+                eng.recomputed.append((parent.name, len(missing)))
+            fresh: Dict[int, List[Any]] = {p: [] for p in missing}
+            for mp in range(parent.n_parts):
+                for k, v in parent._compute(eng, mp):
+                    dst = partition_of(k, self.n_parts)
+                    if dst in fresh:
+                        fresh[dst].append((k, v) if tag is None else (k, (tag, v)))
+                        eng.shuffled += 1
+            store.update(fresh)
+        return store
+
+    def _compute(self, eng: Engine, p: int) -> List[Any]:
+        if not eng.fuse and (self.id, p) in eng.materialized_store:
+            return eng.materialized_store[(self.id, p)]
+        if self.kind == "source":
+            recs = self.data[p]
+        elif not self.wide:
+            parent_recs = self.parents[0]._compute(eng, p)
+            recs = self._narrow(parent_recs)
+            eng.records_processed += len(parent_recs)
+            if not eng.fuse:
+                eng.tasks += 1
+        else:
+            if self.kind == "join":
+                left = self._shuffle_input(eng, self.parents[0], 0)[p]
+                right = self._shuffle_input(eng, self.parents[1], 1)[p]
+                rows = sorted(left + right, key=lambda kv: (json.dumps(kv[0]), kv[1][0]))
+                recs = []
+                for k, grp in itertools.groupby(rows, key=lambda kv: kv[0]):
+                    g = list(grp)
+                    ls = [v for _, (t, v) in g if t == 0]
+                    rs = [v for _, (t, v) in g if t == 1]
+                    recs.extend((k, (a, b)) for a in ls for b in rs)
+            else:
+                rows = sorted(self._shuffle_input(eng, self.parents[0], None)[p], key=lambda kv: json.dumps(kv[0]))
+                recs = []
+                for k, grp in itertools.groupby(rows, key=lambda kv: kv[0]):
+                    vals = [v for _, v in grp]
+                    if self.kind == "group_by_key":
+                        recs.append((k, vals))
+                    else:
+                        acc = vals[0]
+                        for v in vals[1:]:
+                            acc = self.fn(acc, v)
+                        recs.append((k, acc))
+            eng.records_processed += len(rows)
+            if not eng.fuse:
+                eng.tasks += 1
+        if not eng.fuse and self.kind != "source":
+            eng.materialized += len(recs) * eng.dfs_replication
+            eng.materialized_store[(self.id, p)] = recs
+        return recs
