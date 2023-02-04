@@ -1128,3 +1128,118 @@ def pagerank_pregel(edges: Dict[Any, List[Any]], damping: float = 0.85, n_iter: 
         return rank, [], step >= n_iter
 
     return pregel({v: 1.0 / N for v in nodes}, edges, compute, max_supersteps=n_iter + 1)
+
+
+def connected_components_pregel(edges: Dict[Any, List[Any]]) -> Tuple[Dict[Any, Any], List[Dict[str, int]]]:
+    """Composantes connexes (graphe non orienté) : chaque sommet propage le plus petit
+    identifiant qu'il connaît ; il ne parle que si son étiquette a diminué."""
+    und: Dict[Any, List[Any]] = defaultdict(list)
+    for a, ds in edges.items():
+        und.setdefault(a, [])
+        for b in ds:
+            und[a].append(b)
+            und[b].append(a)
+
+    def compute(v, label, msgs, step, out):
+        new = min([label] + msgs)
+        if step == 0 or new < label:
+            return new, [(d, new) for d in out], True
+        return new, [], True
+
+    return pregel({v: v for v in und}, dict(und), compute, max_supersteps=10_000)
+
+
+# =====================================================================================
+# Sorties des workflows
+# =====================================================================================
+
+def make_documents(n_docs: int, vocab: int = 3000, words_per_doc: int = 80, s: float = 1.05,
+                   seed: int = 0) -> Dict[int, str]:
+    """Documents synthétiques : mots tirés d'un vocabulaire de pseudo-mots (loi de Zipf)."""
+    if vocab > 40_000:
+        raise ValueError("vocabulaire limité à 40 000 pseudo-mots")
+    rng = np.random.default_rng(seed)
+    syll = ["ka", "lo", "mi", "ra", "te", "vu", "si", "no", "pe", "da", "fi", "zu", "be", "ol", "an"]
+    words, seen = [], set()
+    while len(words) < vocab:
+        w = "".join(rng.choice(syll, size=int(rng.integers(2, 5))))
+        if w not in seen:
+            seen.add(w)
+            words.append(w)
+    p = zipf_weights(vocab, s)
+    return {d: " ".join(words[i] for i in rng.choice(vocab, size=words_per_doc, p=p)) for d in range(n_docs)}
+
+
+def write_sorted_kv(path: str, items: Iterable[Tuple[str, Any]], index_every: int = 64) -> Dict[str, int]:
+    """Écrit un fichier clé-valeur **trié** (une ligne JSON par couple, clés croissantes) et
+    un index creux `path + '.idx'` (une clé sur `index_every` avec son décalage en octets).
+
+    C'est le principe d'une SSTable : construite en une passe séquentielle par un job de
+    lots, immuable, lisible par recherche dichotomique dans l'index puis lecture d'un bloc.
+    """
+    idx_keys, idx_off = [], []
+    prev = None
+    n = 0
+    with open(path, "wb") as f:
+        for k, v in items:
+            if prev is not None and k <= prev:
+                raise ValueError("les clés doivent être strictement croissantes")
+            if n % index_every == 0:
+                idx_keys.append(k)
+                idx_off.append(f.tell())
+            f.write((json.dumps([k, v]) + "\n").encode("utf-8"))
+            prev = k
+            n += 1
+    with open(path + ".idx", "w", encoding="utf-8") as f:
+        json.dump({"keys": idx_keys, "offsets": idx_off, "count": n}, f)
+    return {"records": n, "bytes": os.path.getsize(path), "index_entries": len(idx_keys)}
+
+
+class SortedKVFile:
+    """Lecteur d'un fichier produit par `write_sorted_kv` (index creux en mémoire)."""
+
+    def __init__(self, path: str):
+        self.path = path
+        with open(path + ".idx", encoding="utf-8") as f:
+            meta = json.load(f)
+        self.keys, self.offsets, self.count = meta["keys"], meta["offsets"], meta["count"]
+        self._f = open(path, "rb")
+        self.lines_scanned = 0
+
+    def get(self, key: str) -> Any:
+        i = bisect.bisect_right(self.keys, key) - 1
+        if i < 0:
+            return None
+        self._f.seek(self.offsets[i])
+        end = self.offsets[i + 1] if i + 1 < len(self.offsets) else None
+        while end is None or self._f.tell() < end:
+            line = self._f.readline()
+            if not line:
+                break
+            self.lines_scanned += 1
+            k, v = json.loads(line)
+            if k == key:
+                return v
+            if k > key:
+                break
+        return None
+
+    def close(self) -> None:
+        self._f.close()
+
+
+def publish_version(base_dir: str, version_dir: str) -> None:
+    """Rend `version_dir` visible de façon atomique : le lien symbolique `base_dir/current`
+    est remplacé par `os.replace` (renommage atomique POSIX). Les lecteurs voient soit
+    l'ancienne version complète, soit la nouvelle, jamais un mélange."""
+    link = os.path.join(base_dir, "current")
+    tmp = os.path.join(base_dir, f".current_tmp_{os.getpid()}")
+    if os.path.lexists(tmp):
+        os.remove(tmp)
+    os.symlink(os.path.relpath(version_dir, base_dir), tmp)
+    os.replace(tmp, link)
+
+
+def current_version(base_dir: str) -> str:
+    """Nom du répertoire de version actuellement publié."""
+    return os.path.basename(os.readlink(os.path.join(base_dir, "current")))
