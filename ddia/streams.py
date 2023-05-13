@@ -141,3 +141,82 @@ def simulate_shared_queue(n_messages: int, n_consumers: int, crash_prob: float =
             heapq.heappush(heap, (t + d, c))
     out.sort(key=lambda p: (p.t_end, p.msg))
     return out
+
+
+def inversions(order: Sequence[int]) -> int:
+    """Nombre de paires (i, j) traitées dans l'ordre inverse de leur envoi."""
+    order = list(order)
+    count = 0
+    for i in range(len(order)):
+        for j in range(i + 1, len(order)):
+            if order[i] > order[j]:
+                count += 1
+    return count
+
+
+def hol_latencies(arrivals: np.ndarray, services: np.ndarray, n_workers: int,
+                  mode: str, keys: Optional[np.ndarray] = None) -> np.ndarray:
+    """Temps de séjour de chaque message (attente + traitement).
+
+    mode "shared"      : file unique, le premier consommateur libre prend le message
+                         suivant (style AMQP, ordre non garanti) ;
+    mode "partitioned" : chaque message va dans la partition `keys[i] % n_workers`, servie
+                         par un seul consommateur dans l'ordre (style journal) : un
+                         message lent bloque ceux qui le suivent dans sa partition.
+    """
+    arrivals = np.asarray(arrivals, float)
+    services = np.asarray(services, float)
+    n = arrivals.size
+    out = np.empty(n)
+    if mode == "shared":
+        free = [0.0] * n_workers
+        heapq.heapify(free)
+        for i in range(n):
+            f = heapq.heappop(free)
+            start = max(f, arrivals[i])
+            end = start + services[i]
+            heapq.heappush(free, end)
+            out[i] = end - arrivals[i]
+    elif mode == "partitioned":
+        keys = np.arange(n) if keys is None else np.asarray(keys)
+        free = np.zeros(n_workers)
+        for i in range(n):
+            p = int(keys[i]) % n_workers
+            start = max(free[p], arrivals[i])
+            free[p] = start + services[i]
+            out[i] = free[p] - arrivals[i]
+    else:
+        raise ValueError(mode)
+    return out
+
+
+# =====================================================================================
+# 2. Journal partitionné à la Kafka
+# =====================================================================================
+
+
+def murmur2(data: bytes) -> int:
+    """Hachage murmur2 32 bits, tel qu'implémenté par le client Java de Kafka."""
+    length = len(data)
+    seed, m, r = 0x9747B28C, 0x5BD1E995, 24
+    h = (seed ^ length) & 0xFFFFFFFF
+    for i in range(length // 4):
+        k = int.from_bytes(data[4 * i: 4 * i + 4], "little")
+        k = (k * m) & 0xFFFFFFFF
+        k ^= k >> r
+        k = (k * m) & 0xFFFFFFFF
+        h = (h * m) & 0xFFFFFFFF
+        h ^= k
+    tail = length & ~3
+    extra = length % 4
+    if extra >= 3:
+        h ^= data[tail + 2] << 16
+    if extra >= 2:
+        h ^= data[tail + 1] << 8
+    if extra >= 1:
+        h ^= data[tail]
+        h = (h * m) & 0xFFFFFFFF
+    h ^= h >> 13
+    h = (h * m) & 0xFFFFFFFF
+    h ^= h >> 15
+    return h & 0xFFFFFFFF
