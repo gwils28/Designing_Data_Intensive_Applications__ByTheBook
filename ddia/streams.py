@@ -220,3 +220,133 @@ def murmur2(data: bytes) -> int:
     h = (h * m) & 0xFFFFFFFF
     h ^= h >> 15
     return h & 0xFFFFFFFF
+
+
+def kafka_partition(key: bytes | str, n_partitions: int) -> int:
+    """Partition choisie par le partitionneur par défaut de Kafka pour une clé non nulle."""
+    if isinstance(key, str):
+        key = key.encode()
+    return (murmur2(key) & 0x7FFFFFFF) % n_partitions
+
+
+@dataclass
+class Record:
+    offset: int
+    key: Any
+    value: Any
+    timestamp: float = 0.0
+
+
+class OffsetOutOfRange(Exception):
+    """L'offset demandé a été supprimé par la rétention (consommateur trop en retard)."""
+
+
+class PartitionedLog:
+    """Sujet (topic) découpé en partitions ; chaque partition est un journal en ajout seul,
+    lui-même découpé en segments de `segment_size` enregistrements.
+
+    - `append(key, value)` choisit la partition par hachage murmur2 de la clé (comme
+      Kafka), ou à tour de rôle si la clé est None, et renvoie (partition, offset) ;
+    - `read(p, offset, max_records)` lit séquentiellement à partir d'un offset ;
+    - `enforce_retention(max_segments)` supprime les plus vieux segments ;
+    - `compact(p)` ne garde, dans les segments fermés, que la dernière valeur de chaque
+      clé (et supprime les pierres tombales, valeur None) : les offsets sont conservés ;
+    - `commit(group, p, offset)` / `committed(group, p)` : offsets des groupes.
+    """
+
+    def __init__(self, n_partitions: int = 1, segment_size: int = 1000):
+        self.n = n_partitions
+        self.segment_size = segment_size
+        self.segments: List[List[List[Record]]] = [[[]] for _ in range(n_partitions)]
+        self.next_offset = [0] * n_partitions
+        self.log_start = [0] * n_partitions
+        self._rr = 0
+        self.offsets: Dict[Tuple[str, int], int] = {}
+
+    # --- écriture --------------------------------------------------------------------
+    def partition_for(self, key) -> int:
+        if key is None:
+            p = self._rr % self.n
+            self._rr += 1
+            return p
+        return kafka_partition(str(key), self.n)
+
+    def append(self, key, value, timestamp: float = 0.0, partition: Optional[int] = None) -> Tuple[int, int]:
+        p = self.partition_for(key) if partition is None else partition
+        segs = self.segments[p]
+        if len(segs[-1]) >= self.segment_size:
+            segs.append([])
+        off = self.next_offset[p]
+        segs[-1].append(Record(off, key, value, timestamp))
+        self.next_offset[p] += 1
+        return p, off
+
+    # --- lecture ---------------------------------------------------------------------
+    def start_offset(self, p: int) -> int:
+        """Premier offset lisible (avancé par la rétention, pas par la compaction)."""
+        return self.log_start[p]
+
+    def end_offset(self, p: int) -> int:
+        """Offset du prochain message à écrire (« high watermark » d'un journal non répliqué)."""
+        return self.next_offset[p]
+
+    def read(self, p: int, offset: int, max_records: Optional[int] = None) -> List[Record]:
+        if offset < self.start_offset(p):
+            raise OffsetOutOfRange(f"partition {p} : offset {offset} < début {self.start_offset(p)}")
+        out: List[Record] = []
+        for seg in self.segments[p]:
+            if not seg or seg[-1].offset < offset:
+                continue
+            i = bisect.bisect_left([r.offset for r in seg], offset)
+            for r in seg[i:]:
+                out.append(r)
+                if max_records is not None and len(out) >= max_records:
+                    return out
+        return out
+
+    def __len__(self) -> int:
+        return sum(self.size(p) for p in range(self.n))
+
+    def size(self, p: int) -> int:
+        return sum(len(s) for s in self.segments[p])
+
+    def lag(self, group: str, p: int) -> int:
+        return self.end_offset(p) - self.committed(group, p)
+
+    # --- rétention et compaction --------------------------------------------------------
+    def enforce_retention(self, max_segments: int) -> int:
+        """Ne garde que les `max_segments` derniers segments par partition ; renvoie le
+        nombre d'enregistrements supprimés."""
+        removed = 0
+        for p in range(self.n):
+            segs = self.segments[p]
+            while len(segs) > max_segments:
+                removed += len(segs.pop(0))
+            self.log_start[p] = next((seg[0].offset for seg in segs if seg), self.next_offset[p])
+        return removed
+
+    def compact(self, p: int) -> int:
+        """Compaction des segments fermés de la partition p ; renvoie le nombre
+        d'enregistrements supprimés. Le segment actif n'est pas touché (comme Kafka)."""
+        segs = self.segments[p]
+        closed, active = segs[:-1], segs[-1]
+        if not closed:
+            return 0
+        latest: Dict[Any, int] = {}
+        for seg in segs:                 # la dernière occurrence peut être dans le segment actif
+            for r in seg:
+                latest[r.key] = r.offset
+        before = sum(len(s) for s in closed)
+        kept = [r for seg in closed for r in seg
+                if latest[r.key] == r.offset and r.value is not None]
+        # regroupement des petits segments
+        new = [kept[i:i + self.segment_size] for i in range(0, len(kept), self.segment_size)] or [[]]
+        self.segments[p] = new + [active]
+        return before - len(kept)
+
+    # --- offsets des groupes de consommateurs ----------------------------------------
+    def commit(self, group: str, p: int, offset: int) -> None:
+        self.offsets[(group, p)] = offset
+
+    def committed(self, group: str, p: int) -> int:
+        return self.offsets.get((group, p), 0)
