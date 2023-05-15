@@ -350,3 +350,101 @@ class PartitionedLog:
 
     def committed(self, group: str, p: int) -> int:
         return self.offsets.get((group, p), 0)
+
+
+def range_assign(n_partitions: int, members: Sequence[str]) -> Dict[str, List[int]]:
+    """Affectation « range » des partitions aux membres d'un groupe (triés par nom) :
+    chaque membre reçoit un bloc contigu ; au-delà de n_partitions membres, les suivants
+    restent inactifs."""
+    members = sorted(members)
+    out: Dict[str, List[int]] = {m: [] for m in members}
+    k = len(members)
+    base, extra = divmod(n_partitions, k)
+    start = 0
+    for i, m in enumerate(members):
+        cnt = base + (1 if i < extra else 0)
+        out[m] = list(range(start, start + cnt))
+        start += cnt
+    return out
+
+
+def simulate_offset_commits(n_messages: int, commit_every: int, crash_prob: float,
+                            mode: str = "after", seed: int = 0) -> Dict[str, Any]:
+    """Consommateur d'une partition qui valide (commit) son offset tous les
+    `commit_every` messages et tombe en panne avec probabilité `crash_prob` après
+    chaque message. Au redémarrage, il reprend à l'offset validé.
+
+    mode "after"  : traiter puis valider (au moins une fois : doublons possibles) ;
+    mode "before" : valider le lot puis le traiter (au plus une fois : pertes possibles).
+    Renvoie le nombre de traitements de chaque message, les doublons, les pertes et les
+    pannes.
+    """
+    rng = random.Random(seed)
+    times = np.zeros(n_messages, dtype=int)
+    committed = 0
+    crashes = 0
+    pos = 0
+    while pos < n_messages:
+        if mode == "before":
+            batch_end = min(n_messages, pos + commit_every)
+            committed = batch_end
+            for i in range(pos, batch_end):
+                times[i] += 1
+                if rng.random() < crash_prob:
+                    crashes += 1
+                    break
+            pos = committed
+            continue
+        # mode "after"
+        times[pos] += 1
+        pos += 1
+        if pos % commit_every == 0 or pos == n_messages:
+            committed = pos
+        if pos < n_messages and rng.random() < crash_prob:
+            crashes += 1
+            pos = committed
+    return {"times": times, "duplicates": int((times - 1).clip(min=0).sum()),
+            "lost": int((times == 0).sum()), "crashes": crashes}
+
+
+# =====================================================================================
+# 3. Bases de données et flux : double écriture, CDC, compaction
+# =====================================================================================
+
+
+def simulate_dual_writes(n_writes: int, n_keys: int, rate: float, delay: Tuple[float, float] = (1.0, 5.0),
+                         fail_prob: float = 0.0, mode: str = "dual", seed: int = 0) -> Dict[str, Any]:
+    """Des clients mettent à jour des clés dans une base puis dans un index de recherche.
+
+    mode "dual" : chaque client écrit dans la base, attend l'accusé, puis écrit dans
+                  l'index ; chaque écriture subit un délai réseau aléatoire, et l'écriture
+                  dans l'index échoue avec probabilité `fail_prob` ;
+    mode "cdc"  : le client n'écrit que dans la base ; l'index applique le journal des
+                  changements dans l'ordre de validation de la base.
+    Renvoie la fraction de clés dont la valeur finale diffère entre base et index.
+    """
+    rng = random.Random(seed)
+    db_writes: List[Tuple[float, int, int]] = []
+    idx_writes: List[Tuple[float, int, int]] = []
+    t = 0.0
+    for v in range(n_writes):
+        t += rng.expovariate(rate)
+        k = rng.randrange(n_keys)
+        t_db = t + rng.uniform(*delay)
+        db_writes.append((t_db, k, v))
+        if mode == "dual":
+            t_ack = t_db + rng.uniform(*delay)
+            t_idx = t_ack + rng.uniform(*delay)
+            if rng.random() >= fail_prob:
+                idx_writes.append((t_idx, k, v))
+    db: Dict[int, int] = {}
+    for _, k, v in sorted(db_writes):
+        db[k] = v
+    if mode == "cdc":
+        idx = dict(db)
+    else:
+        idx = {}
+        for _, k, v in sorted(idx_writes):
+            idx[k] = v
+    diverged = sum(1 for k in db if idx.get(k) != db[k])
+    return {"db": db, "index": idx, "diverged": diverged, "frac_diverged": diverged / max(1, len(db))}
