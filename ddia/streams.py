@@ -448,3 +448,86 @@ def simulate_dual_writes(n_writes: int, n_keys: int, rate: float, delay: Tuple[f
             idx[k] = v
     diverged = sum(1 for k in db if idx.get(k) != db[k])
     return {"db": db, "index": idx, "diverged": diverged, "frac_diverged": diverged / max(1, len(db))}
+
+
+class CdcDatabase:
+    """Base SQLite dont chaque table suivie alimente un journal des changements
+    `_changelog` par des déclencheurs (triggers) : c'est une capture des changements
+    (CDC) minimale. Le numéro `lsn` du journal joue le rôle de position dans le journal
+    de réplication (log sequence number).
+    """
+
+    def __init__(self):
+        self.conn = sqlite3.connect(":memory:", isolation_level=None)
+        self.conn.execute("CREATE TABLE _changelog (lsn INTEGER PRIMARY KEY AUTOINCREMENT, "
+                          "tbl TEXT, op TEXT, pk, row TEXT)")
+        self.tables: Dict[str, Tuple[str, List[str]]] = {}
+
+    def create_table(self, name: str, pk: str, columns: Sequence[str]) -> None:
+        cols = [pk] + [c for c in columns if c != pk]
+        self.conn.execute(f"CREATE TABLE {name} ({pk} PRIMARY KEY, " + ", ".join(cols[1:]) + ")")
+        self.tables[name] = (pk, cols)
+        obj = lambda pref: "json_object(" + ", ".join(f"'{c}', {pref}.{c}" for c in cols) + ")"
+        for op, pref in (("INSERT", "NEW"), ("UPDATE", "NEW"), ("DELETE", "OLD")):
+            row = "NULL" if op == "DELETE" else obj(pref)
+            self.conn.execute(
+                f"CREATE TRIGGER {name}_{op.lower()} AFTER {op} ON {name} BEGIN "
+                f"INSERT INTO _changelog (tbl, op, pk, row) VALUES ('{name}', '{op.lower()}', "
+                f"{pref}.{pk}, {row}); END")
+
+    def execute(self, sql: str, params: Sequence = ()) -> sqlite3.Cursor:
+        return self.conn.execute(sql, params)
+
+    def changes(self, since: int = 0, limit: int = -1) -> List[Dict[str, Any]]:
+        rows = self.conn.execute("SELECT lsn, tbl, op, pk, row FROM _changelog WHERE lsn > ? "
+                                 "ORDER BY lsn LIMIT ?", (since, limit)).fetchall()
+        return [{"lsn": l, "table": t, "op": o, "key": k, "row": json.loads(r) if r else None}
+                for l, t, o, k, r in rows]
+
+    def snapshot(self, table: str) -> Tuple[int, List[Tuple]]:
+        """Instantané cohérent : (position du journal, lignes) lus dans une même transaction."""
+        self.conn.execute("BEGIN")
+        lsn = self.conn.execute("SELECT COALESCE(MAX(lsn), 0) FROM _changelog").fetchone()[0]
+        rows = self.conn.execute(f"SELECT * FROM {table}").fetchall()
+        self.conn.execute("COMMIT")
+        return lsn, rows
+
+
+class SearchIndex:
+    """Index inversé minimal, système dérivé alimenté par des événements de changement."""
+
+    def __init__(self, text_field: str = "text"):
+        self.text_field = text_field
+        self.docs: Dict[Any, str] = {}
+        self.postings: Dict[str, set] = defaultdict(set)
+        self.position = 0          # dernier lsn appliqué
+
+    @staticmethod
+    def tokens(text: str) -> List[str]:
+        return [t for t in "".join(ch.lower() if ch.isalnum() else " " for ch in text).split() if t]
+
+    def _remove(self, key) -> None:
+        old = self.docs.pop(key, None)
+        if old is not None:
+            for t in set(self.tokens(old)):
+                self.postings[t].discard(key)
+
+    def upsert(self, key, text: str) -> None:
+        self._remove(key)
+        self.docs[key] = text
+        for t in set(self.tokens(text)):
+            self.postings[t].add(key)
+
+    def delete(self, key) -> None:
+        self._remove(key)
+
+    def apply(self, change: Dict[str, Any]) -> None:
+        """Applique un événement de changement produit par `CdcDatabase.changes`."""
+        if change["op"] == "delete" or change["row"] is None:
+            self.delete(change["key"])
+        else:
+            self.upsert(change["key"], str(change["row"].get(self.text_field, "")))
+        self.position = change["lsn"]
+
+    def search(self, term: str) -> List[Any]:
+        return sorted(self.postings.get(term.lower(), set()), key=str)
