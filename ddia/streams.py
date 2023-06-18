@@ -531,3 +531,81 @@ class SearchIndex:
 
     def search(self, term: str) -> List[Any]:
         return sorted(self.postings.get(term.lower(), set()), key=str)
+
+
+def compact_records(records: Iterable[Tuple[Any, Any]]) -> List[Tuple[int, Any, Any]]:
+    """Compaction d'une suite (clé, valeur) : garde la dernière valeur de chaque clé,
+    supprime les clés dont la dernière valeur est None (pierre tombale). Renvoie des
+    triplets (offset d'origine, clé, valeur) dans l'ordre des offsets."""
+    records = list(records)
+    last: Dict[Any, int] = {}
+    for i, (k, _) in enumerate(records):
+        last[k] = i
+    return [(i, k, v) for i, (k, v) in enumerate(records) if last[k] == i and v is not None]
+
+
+# =====================================================================================
+# 4. Event sourcing
+# =====================================================================================
+
+
+class ConcurrencyError(Exception):
+    """La version attendue du flux ne correspond pas (écriture concurrente)."""
+
+
+@dataclass
+class Event:
+    stream: str
+    version: int
+    type: str
+    data: Dict[str, Any]
+    position: int = 0          # position dans le journal global
+
+
+class EventStore:
+    """Magasin d'événements en ajout seul, découpé en flux (un par agrégat).
+
+    `append(stream, events, expected_version)` refuse l'écriture si la version courante
+    du flux n'est pas celle attendue : c'est un contrôle de concurrence optimiste qui
+    suffit tant qu'une commande ne touche qu'un seul flux.
+    """
+
+    def __init__(self):
+        self.log: List[Event] = []
+        self.versions: Dict[str, int] = defaultdict(int)
+        self.subscribers: List[Callable[[Event], None]] = []
+
+    def append(self, stream: str, events: Sequence[Tuple[str, Dict[str, Any]]],
+               expected_version: Optional[int] = None) -> int:
+        cur = self.versions[stream]
+        if expected_version is not None and expected_version != cur:
+            raise ConcurrencyError(f"{stream} : version {cur}, attendue {expected_version}")
+        for typ, data in events:
+            cur += 1
+            ev = Event(stream, cur, typ, dict(data), len(self.log))
+            self.log.append(ev)
+            for s in self.subscribers:
+                s(ev)
+        self.versions[stream] = cur
+        return cur
+
+    def read(self, stream: Optional[str] = None, from_position: int = 0) -> List[Event]:
+        return [e for e in self.log[from_position:] if stream is None or e.stream == stream]
+
+    def subscribe(self, fn: Callable[[Event], None], from_start: bool = True) -> None:
+        if from_start:
+            for e in self.log:
+                fn(e)
+        self.subscribers.append(fn)
+
+
+def replay(events: Iterable[Event], apply: Callable[[Any, Event], Any], state: Any = None) -> Any:
+    """Plie (fold) une suite d'événements : état = apply(...apply(apply(état0, e1), e2)...)."""
+    for e in events:
+        state = apply(state, e)
+    return state
+
+
+# =====================================================================================
+# 5. Usages : CEP, HyperLogLog, percolateur
+# =====================================================================================
