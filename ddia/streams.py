@@ -609,3 +609,79 @@ def replay(events: Iterable[Event], apply: Callable[[Any, Event], Any], state: A
 # =====================================================================================
 # 5. Usages : CEP, HyperLogLog, percolateur
 # =====================================================================================
+
+
+def detect_brute_force(events: Iterable[Tuple[float, str, str]], n_fail: int = 3,
+                       within: float = 60.0) -> List[Tuple[float, str, int]]:
+    """Motif CEP : au moins `n_fail` échecs de connexion d'un même utilisateur suivis
+    d'un succès, le tout en moins de `within` secondes. Les événements sont des triplets
+    (t, utilisateur, "fail" | "ok"), dans l'ordre. Une petite machine à états par
+    utilisateur (file des instants d'échec récents) suffit. Renvoie (t, utilisateur,
+    nombre d'échecs) pour chaque détection : c'est l'« événement complexe »."""
+    fails: Dict[str, deque] = defaultdict(deque)
+    out = []
+    for t, user, kind in events:
+        q = fails[user]
+        while q and q[0] < t - within:
+            q.popleft()
+        if kind == "fail":
+            q.append(t)
+        elif kind == "ok":
+            if len(q) >= n_fail:
+                out.append((t, user, len(q)))
+            q.clear()
+    return out
+
+
+def hash64(item) -> int:
+    """Hachage 64 bits (blake2b) de la représentation textuelle d'un élément."""
+    return int.from_bytes(hashlib.blake2b(str(item).encode(), digest_size=8).digest(), "big")
+
+
+class HyperLogLog:
+    """Estimateur de cardinalité HyperLogLog (Flajolet et al., 2007).
+
+    2^p registres ; chacun garde le rang du premier bit à 1 maximal observé parmi les
+    hachages qui tombent dans ce registre. Erreur relative typique 1,04 / sqrt(2^p),
+    pour une mémoire de 2^p registres de 6 bits, quel que soit le nombre d'éléments.
+    """
+
+    def __init__(self, p: int = 12):
+        self.p = p
+        self.m = 1 << p
+        self.reg = np.zeros(self.m, dtype=np.uint8)
+
+    def add(self, item) -> None:
+        h = hash64(item)
+        j = h >> (64 - self.p)
+        w = h & ((1 << (64 - self.p)) - 1)
+        rank = (64 - self.p) - w.bit_length() + 1
+        if rank > self.reg[j]:
+            self.reg[j] = rank
+
+    def add_hashes(self, hashes: np.ndarray) -> None:
+        """Version vectorisée de `add` pour des hachages 64 bits déjà calculés (`hash64`)."""
+        h = np.asarray(hashes, dtype=np.uint64)
+        j = (h >> np.uint64(64 - self.p)).astype(np.int64)
+        w = h & np.uint64((1 << (64 - self.p)) - 1)
+        bitlen = np.where(w > 0, np.frexp(w.astype(np.float64))[1], 0)
+        rank = ((64 - self.p) - bitlen + 1).astype(np.uint8)
+        np.maximum.at(self.reg, j, rank)
+
+    def count(self) -> float:
+        m = self.m
+        alpha = 0.7213 / (1 + 1.079 / m)
+        est = alpha * m * m / np.sum(2.0 ** (-self.reg.astype(float)))
+        zeros = int(np.sum(self.reg == 0))
+        if est <= 2.5 * m and zeros:
+            est = m * math.log(m / zeros)          # correction des petites cardinalités
+        return float(est)
+
+    def merge(self, other: "HyperLogLog") -> "HyperLogLog":
+        out = HyperLogLog(self.p)
+        out.reg = np.maximum(self.reg, other.reg)
+        return out
+
+    @property
+    def memory_bytes(self) -> int:
+        return self.m * 6 // 8
