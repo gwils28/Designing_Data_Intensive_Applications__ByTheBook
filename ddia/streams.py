@@ -685,3 +685,83 @@ class HyperLogLog:
     @property
     def memory_bytes(self) -> int:
         return self.m * 6 // 8
+
+
+class Percolator:
+    """Recherche sur un flux : les requêtes sont stockées, les documents passent.
+
+    Une requête est un ensemble de termes qui doivent tous figurer dans le document.
+    `match_naive` teste chaque requête ; `match_indexed` n'examine que les requêtes
+    indexées sous un de leurs termes (le plus rare, d'après `df`) présent dans le
+    document. Les deux renvoient (requêtes satisfaites, nombre de requêtes examinées).
+    """
+
+    def __init__(self, df: Optional[Dict[str, float]] = None):
+        self.queries: Dict[Any, frozenset] = {}
+        self.by_term: Dict[str, List[Any]] = defaultdict(list)
+        self.df = df or {}
+
+    def add(self, qid, terms: Iterable[str]) -> None:
+        terms = frozenset(terms)
+        self.queries[qid] = terms
+        rare = min(terms, key=lambda t: (self.df.get(t, 0.0), t))
+        self.by_term[rare].append(qid)
+
+    def match_naive(self, doc_terms: Iterable[str]) -> Tuple[List[Any], int]:
+        d = set(doc_terms)
+        hits = [q for q, ts in self.queries.items() if ts <= d]
+        return hits, len(self.queries)
+
+    def match_indexed(self, doc_terms: Iterable[str]) -> Tuple[List[Any], int]:
+        d = set(doc_terms)
+        cand = [q for t in d for q in self.by_term.get(t, ())]
+        hits = [q for q in cand if self.queries[q] <= d]
+        return sorted(hits, key=str), len(cand)
+
+
+# =====================================================================================
+# 6. Le temps : fenêtres, filigranes, retardataires
+# =====================================================================================
+
+
+def tumbling_counts(ts: Sequence[float], size: float, origin: float = 0.0) -> Dict[float, int]:
+    """Fenêtres fixes (tumbling) : chaque événement dans exactement une fenêtre
+    [origin + k*size, origin + (k+1)*size)."""
+    out: Dict[float, int] = defaultdict(int)
+    for t in ts:
+        out[origin + math.floor((t - origin) / size) * size] += 1
+    return dict(sorted(out.items()))
+
+
+def hopping_counts(ts: Sequence[float], size: float, hop: float, origin: float = 0.0) -> Dict[float, int]:
+    """Fenêtres glissantes par saut (hopping) de longueur `size` démarrant tous les
+    `hop` : calculées comme somme de size/hop fenêtres fixes de longueur `hop`."""
+    k = int(round(size / hop))
+    if abs(k * hop - size) > 1e-9:
+        raise ValueError("size doit être un multiple de hop")
+    base = tumbling_counts(ts, hop, origin)
+    if not base:
+        return {}
+    lo, hi = min(base), max(base)
+    out = {}
+    start = lo - (k - 1) * hop
+    while start <= hi + 1e-9:
+        c = sum(base.get(round(start + i * hop, 9), 0) for i in range(k))
+        if c:
+            out[round(start, 9)] = c
+        start += hop
+    return out
+
+
+def sliding_counts(ts: Sequence[float], width: float) -> np.ndarray:
+    """Fenêtre glissante (sliding) : pour chaque événement, nombre d'événements dont
+    l'horodatage est dans ]t - width, t]. Implémentée avec un tampon trié dont on retire
+    les événements expirés (les événements sont supposés arriver dans l'ordre)."""
+    buf: deque = deque()
+    out = np.empty(len(ts), dtype=int)
+    for i, t in enumerate(ts):
+        buf.append(t)
+        while buf[0] <= t - width:
+            buf.popleft()
+        out[i] = len(buf)
+    return out
