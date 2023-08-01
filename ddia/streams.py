@@ -765,3 +765,90 @@ def sliding_counts(ts: Sequence[float], width: float) -> np.ndarray:
             buf.popleft()
         out[i] = len(buf)
     return out
+
+
+def sessionize(events: Iterable[Tuple[Any, float]], gap: float) -> List[Tuple[Any, float, float, int]]:
+    """Fenêtres de session : regroupe les événements (clé, t) d'une même clé séparés de
+    moins de `gap` ; renvoie (clé, début, fin, nombre d'événements), trié par début."""
+    by_key: Dict[Any, List[float]] = defaultdict(list)
+    for k, t in events:
+        by_key[k].append(t)
+    out = []
+    for k, ts in by_key.items():
+        ts.sort()
+        start = prev = ts[0]
+        n = 1
+        for t in ts[1:]:
+            if t - prev > gap:
+                out.append((k, start, prev, n))
+                start, n = t, 0
+            prev = t
+            n += 1
+        out.append((k, start, prev, n))
+    out.sort(key=lambda s: (s[1], str(s[0])))
+    return out
+
+
+@dataclass
+class WindowResult:
+    window: float
+    count: int
+    emitted_at: float
+    kind: str            # "final" ou "correction"
+
+
+class WatermarkCounter:
+    """Compteur par fenêtres fixes en temps d'événement, déclenché par un filigrane.
+
+    Les événements (temps d'événement, temps d'arrivée) sont traités dans l'ordre
+    d'arrivée. Le filigrane vaut « plus grand temps d'événement vu - `lateness` » : on
+    parie qu'aucun événement plus ancien n'arrivera. Une fenêtre [w, w + size) est émise
+    quand le filigrane dépasse w + size. Un événement qui arrive après l'émission de sa
+    fenêtre est un **retardataire** : politique "drop" (ignoré, compté) ou "update"
+    (correction émise avec la nouvelle valeur).
+    """
+
+    def __init__(self, size: float, lateness: float, policy: str = "drop"):
+        self.size, self.lateness, self.policy = size, lateness, policy
+        self.open: Dict[float, int] = {}
+        self.closed: Dict[float, int] = {}
+        self.watermark = -math.inf
+        self.results: List[WindowResult] = []
+        self.dropped = 0
+        self.max_open = 0
+
+    def process(self, event_time: float, arrival: float) -> None:
+        w = math.floor(event_time / self.size) * self.size
+        if w in self.closed:
+            if self.policy == "drop":
+                self.dropped += 1
+            else:
+                self.closed[w] += 1
+                self.results.append(WindowResult(w, self.closed[w], arrival, "correction"))
+        else:
+            self.open[w] = self.open.get(w, 0) + 1
+        self.watermark = max(self.watermark, event_time - self.lateness)
+        for ws in sorted(self.open):
+            if ws + self.size <= self.watermark:
+                c = self.open.pop(ws)
+                self.closed[ws] = c
+                self.results.append(WindowResult(ws, c, arrival, "final"))
+        self.max_open = max(self.max_open, len(self.open))
+
+    def flush(self, at: float) -> None:
+        for ws in sorted(self.open):
+            c = self.open.pop(ws)
+            self.closed[ws] = c
+            self.results.append(WindowResult(ws, c, at, "final"))
+
+    def run(self, event_times: Sequence[float], arrivals: Sequence[float]) -> "WatermarkCounter":
+        order = np.argsort(arrivals, kind="stable")
+        for i in order:
+            self.process(float(event_times[i]), float(arrivals[i]))
+        self.flush(float(np.max(arrivals)))
+        return self
+
+
+# =====================================================================================
+# 7. Jointures de flux
+# =====================================================================================
