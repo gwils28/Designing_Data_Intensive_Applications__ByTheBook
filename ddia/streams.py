@@ -852,3 +852,78 @@ class WatermarkCounter:
 # =====================================================================================
 # 7. Jointures de flux
 # =====================================================================================
+
+
+class SearchClickJoin:
+    """Jointure flux-flux (fenêtrée) entre recherches et clics d'une même session.
+
+    Événements (kind, session, t) traités dans l'ordre d'arrivée, kind = "search" ou
+    "click". L'état garde, par session, les recherches et les clics de la dernière
+    `window` (en temps d'événement). Sorties : ("clicked", session, délai) dès qu'une
+    paire est complète, ("not_clicked", session, None) quand une recherche expire sans
+    clic. `state_size` suit le nombre d'événements en mémoire.
+    """
+
+    def __init__(self, window: float):
+        self.window = window
+        self.searches: Dict[Any, float] = {}
+        self.clicks: Dict[Any, float] = {}
+        self.out: List[Tuple[str, Any, Optional[float]]] = []
+        self.state_size: List[int] = []
+        self.clock = -math.inf
+        self._expiry: List[Tuple[float, int, str, Any]] = []     # tas (instant, n°, type, session)
+        self._n = 0
+
+    def _expire(self) -> None:
+        limit = self.clock - self.window
+        while self._expiry and self._expiry[0][0] < limit:
+            t, _, kind, s = heapq.heappop(self._expiry)
+            if kind == "search" and self.searches.get(s) == t:
+                del self.searches[s]
+                self.out.append(("not_clicked", s, None))
+            elif kind == "click" and self.clicks.get(s) == t:
+                del self.clicks[s]
+
+    def process(self, kind: str, session, t: float) -> None:
+        self.clock = max(self.clock, t)
+        if kind == "search":
+            if session in self.clicks:                  # le clic est arrivé avant la recherche
+                self.out.append(("clicked", session, self.clicks.pop(session) - t))
+            else:
+                self.searches[session] = t
+                heapq.heappush(self._expiry, (t, self._n, "search", session))
+        else:
+            if session in self.searches:
+                self.out.append(("clicked", session, t - self.searches.pop(session)))
+            else:
+                self.clicks[session] = t
+                heapq.heappush(self._expiry, (t, self._n, "click", session))
+        self._n += 1
+        self._expire()
+        self.state_size.append(len(self.searches) + len(self.clicks))
+
+    def flush(self) -> None:
+        for s in list(self.searches):
+            self.out.append(("not_clicked", s, None))
+        self.searches.clear()
+        self.clicks.clear()
+        self._expiry.clear()
+
+
+def enrich(stream: Iterable[Tuple[str, Any, Any]]) -> List[Tuple[Any, Any, Any]]:
+    """Jointure flux-table : le flux mêle des changements de la table des profils
+    ("profile", user, profil) et des événements d'activité ("activity", user, action),
+    dans l'ordre où l'opérateur les reçoit. L'opérateur garde une copie locale de la
+    table (fenêtre « depuis l'origine des temps ») et enrichit chaque activité avec le
+    profil connu *à cet instant*. Renvoie (user, action, profil)."""
+    table: Dict[Any, Any] = {}
+    out = []
+    for kind, user, payload in stream:
+        if kind == "profile":
+            if payload is None:
+                table.pop(user, None)
+            else:
+                table[user] = payload
+        else:
+            out.append((user, payload, table.get(user)))
+    return out
