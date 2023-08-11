@@ -927,3 +927,110 @@ def enrich(stream: Iterable[Tuple[str, Any, Any]]) -> List[Tuple[Any, Any, Any]]
         else:
             out.append((user, payload, table.get(user)))
     return out
+
+
+class TimelineView:
+    """Jointure table-table : timelines matérialisées à partir de deux flux de
+    changements, les messages (posts) et les abonnements (follows).
+
+    Événements : ("post", auteur, post_id), ("delete_post", auteur, post_id),
+    ("follow", abonné, suivi), ("unfollow", abonné, suivi). La vue est le résultat de
+    « posts JOIN follows ON follows.followee = posts.sender GROUP BY follower ». Chaque
+    changement d'une table est joint à l'état courant de l'autre (règle du produit) :
+    Δ(P ⋈ F) = ΔP ⋈ F + P ⋈ ΔF.
+    """
+
+    def __init__(self):
+        self.followers: Dict[Any, set] = defaultdict(set)
+        self.posts: Dict[Any, set] = defaultdict(set)
+        self.timelines: Dict[Any, set] = defaultdict(set)
+        self.writes = 0          # nombre de modifications élémentaires de la vue
+
+    def apply(self, kind: str, a, b) -> None:
+        if kind == "post":
+            self.posts[a].add(b)
+            for f in self.followers[a]:
+                self.timelines[f].add(b)
+                self.writes += 1
+        elif kind == "delete_post":
+            self.posts[a].discard(b)
+            for f in self.followers[a]:
+                self.timelines[f].discard(b)
+                self.writes += 1
+        elif kind == "follow":
+            if b not in self.followers or a not in self.followers[b]:
+                self.followers[b].add(a)
+                self.timelines[a] |= self.posts[b]
+                self.writes += len(self.posts[b])
+        elif kind == "unfollow":
+            self.followers[b].discard(a)
+            self.timelines[a] -= self.posts[b]
+            self.writes += len(self.posts[b])
+        else:
+            raise ValueError(kind)
+
+    def view(self) -> Dict[Any, set]:
+        return {u: set(s) for u, s in self.timelines.items() if s}
+
+
+# =====================================================================================
+# 8. Tolérance aux pannes
+# =====================================================================================
+
+
+def run_stateful_job(keys: Sequence[Any], mode: str, crash_after: Iterable[int],
+                     commit_every: int = 10) -> Dict[str, Any]:
+    """Job de comptage par clé qui lit un journal et écrit dans une base externe.
+
+    keys        : clés des messages du journal (offset = indice) ;
+    crash_after : offsets après le traitement desquels le job tombe en panne (une
+                  seule fois chacun) ; il redémarre alors à l'offset validé ;
+    mode :
+      - "at_most_once"  : valide l'offset du lot avant de le traiter ;
+      - "at_least_once" : incrémente le compteur externe puis valide tous les
+                          `commit_every` messages ;
+      - "idempotent"    : comme ci-dessus, mais la base garde avec chaque compteur
+                          l'offset du dernier message appliqué et ignore un message
+                          déjà vu ;
+      - "transactional" : effets et offset validés atomiquement par lots (tout ou rien).
+    Renvoie les compteurs obtenus, les compteurs exacts et les écarts.
+    """
+    crash = set(crash_after)
+    truth: Dict[Any, int] = defaultdict(int)
+    for k in keys:
+        truth[k] += 1
+    sink: Dict[Any, int] = defaultdict(int)
+    applied: Dict[Any, int] = {}          # mode idempotent : dernier offset appliqué par clé
+    committed = 0
+    pos = 0
+    pending: Dict[Any, int] = defaultdict(int)   # mode transactionnel : effets non validés
+    n = len(keys)
+    while pos < n:
+        if mode == "at_most_once" and pos == committed:
+            committed = min(n, pos + commit_every)
+        k = keys[pos]
+        if mode in ("at_least_once", "at_most_once"):
+            sink[k] += 1
+        elif mode == "idempotent":
+            if applied.get(k, -1) < pos:
+                sink[k] += 1
+                applied[k] = pos
+        elif mode == "transactional":
+            pending[k] += 1
+        else:
+            raise ValueError(mode)
+        pos += 1
+        if mode != "at_most_once" and (pos % commit_every == 0 or pos == n):
+            if mode == "transactional":
+                for kk, v in pending.items():
+                    sink[kk] += v
+                pending.clear()
+            committed = pos
+        if (pos - 1) in crash:
+            crash.discard(pos - 1)
+            pending.clear()
+            pos = committed
+    diff = {k: sink.get(k, 0) - truth[k] for k in truth}
+    return {"sink": dict(sink), "truth": dict(truth),
+            "excess": sum(v for v in diff.values() if v > 0),
+            "missing": -sum(v for v in diff.values() if v < 0)}
