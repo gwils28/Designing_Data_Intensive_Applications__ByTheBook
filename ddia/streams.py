@@ -1034,3 +1034,32 @@ def run_stateful_job(keys: Sequence[Any], mode: str, crash_after: Iterable[int],
     return {"sink": dict(sink), "truth": dict(truth),
             "excess": sum(v for v in diff.values() if v > 0),
             "missing": -sum(v for v in diff.values() if v < 0)}
+
+
+class FencedSink:
+    """Base externe qui refuse les écritures portant un jeton (époque) périmé.
+
+    Chaque nouvelle instance d'un job reçoit une époque strictement plus grande (par
+    exemple du coordinateur du groupe) ; une écriture d'une instance « zombie », que
+    l'on croyait morte, porte une époque plus petite et est rejetée.
+    """
+
+    def __init__(self, fencing: bool = True):
+        self.fencing = fencing
+        self.max_epoch = -1
+        self.data: Dict[Any, Any] = {}
+        self.rejected = 0
+
+    def write(self, key, value, epoch: int) -> bool:
+        if self.fencing and epoch < self.max_epoch:
+            self.rejected += 1
+            return False
+        self.max_epoch = max(self.max_epoch, epoch)
+        self.data[key] = value
+        return True
+
+
+def young_interval(checkpoint_cost: float, mtbf: float) -> float:
+    """Intervalle de checkpoint optimal au premier ordre (formule de Young, 1974) :
+    minimise surcoût C/T + travail perdu T/(2 MTBF) ; T* = sqrt(2 C MTBF)."""
+    return math.sqrt(2 * checkpoint_cost * mtbf)
