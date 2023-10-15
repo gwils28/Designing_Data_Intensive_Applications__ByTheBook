@@ -97,3 +97,138 @@ def test_debordement():
     assert b["lost"][-1] == 0 and b["delivered"].sum() == pytest.approx(200)
     u = s.simulate_overflow(prod, 5, 20, "buffer")
     assert u["queue"].max() == pytest.approx(100)
+
+
+def test_double_ecriture_contre_cdc():
+    dual = s.simulate_dual_writes(3000, 200, rate=50, seed=2)
+    cdc = s.simulate_dual_writes(3000, 200, rate=50, mode="cdc", seed=2)
+    assert dual["frac_diverged"] > 0
+    assert cdc["diverged"] == 0
+
+
+def test_cdc_sqlite_et_index_derive():
+    db = s.CdcDatabase()
+    db.create_table("docs", "id", ["id", "text"])
+    db.execute("INSERT INTO docs VALUES (1, 'chat noir')")
+    db.execute("INSERT INTO docs VALUES (2, 'chien blanc')")
+    db.execute("UPDATE docs SET text = 'chat blanc' WHERE id = 1")
+    db.execute("DELETE FROM docs WHERE id = 2")
+    ch = db.changes()
+    assert [c["op"] for c in ch] == ["insert", "insert", "update", "delete"]
+    idx = s.SearchIndex()
+    for c in ch:
+        idx.apply(c)
+    assert idx.search("blanc") == [1] and idx.search("chien") == []
+    lsn, rows = db.snapshot("docs")
+    assert lsn == 4 and rows == [(1, "chat blanc")]
+
+
+def test_event_store_concurrence_optimiste():
+    es = s.EventStore()
+    es.append("cart-1", [("added", {"item": "a"})], expected_version=0)
+    es.append("cart-1", [("added", {"item": "b"}), ("removed", {"item": "a"})], expected_version=1)
+    with pytest.raises(s.ConcurrencyError):
+        es.append("cart-1", [("added", {"item": "c"})], expected_version=1)
+
+    def apply(st, e):
+        st = set() if st is None else set(st)
+        (st.add if e.type == "added" else st.discard)(e.data["item"])
+        return st
+    assert s.replay(es.read("cart-1"), apply) == {"b"}
+    seen = []
+    es.subscribe(seen.append)
+    es.append("cart-2", [("added", {"item": "z"})])
+    assert len(seen) == 4
+
+
+def test_cep_hll_percolateur():
+    ev = [(0, "u", "fail"), (5, "u", "fail"), (9, "u", "fail"), (10, "u", "ok"),
+          (100, "v", "fail"), (200, "v", "fail"), (300, "v", "fail"), (301, "v", "ok")]
+    assert s.detect_brute_force(ev, 3, 60) == [(10, "u", 3)]
+    h = s.HyperLogLog(12)
+    for i in range(50_000):
+        h.add(i % 20_000)
+    assert abs(h.count() / 20_000 - 1) < 0.05
+    hv = s.HyperLogLog(12)
+    hv.add_hashes(np.array([s.hash64(i % 20_000) for i in range(50_000)], dtype=np.uint64))
+    assert np.array_equal(hv.reg, h.reg)
+    small = s.HyperLogLog(10)
+    for i in range(100):
+        small.add(i)
+    assert abs(small.count() - 100) < 10
+    p = s.Percolator(df={"maison": 0.3, "jardin": 0.05, "lyon": 0.1})
+    p.add("q1", ["maison", "jardin"])
+    p.add("q2", ["maison", "lyon"])
+    assert p.match_naive(["maison", "jardin", "piscine"])[0] == ["q1"]
+    hits, examined = p.match_indexed(["maison", "jardin", "piscine"])
+    assert hits == ["q1"] and examined == 1
+
+
+def test_fenetres():
+    ts = [0.5, 1.2, 1.9, 3.1, 7.0]
+    assert s.tumbling_counts(ts, 2.0) == {0.0: 3, 2.0: 1, 6.0: 1}
+    hop = s.hopping_counts(ts, 2.0, 1.0)
+    assert hop[1.0] == 2 and hop[0.0] == 3 and hop[-1.0] == 1
+    assert list(s.sliding_counts(ts, 2.0)) == [1, 2, 3, 3, 1]
+    sess = s.sessionize([("a", 0), ("a", 10), ("a", 50), ("b", 5)], gap=30)
+    assert sess == [("a", 0, 10, 2), ("b", 5, 5, 1), ("a", 50, 50, 1)]
+
+
+def test_filigrane_et_retardataires():
+    et = np.array([1, 2, 11, 3, 12, 25, 4])
+    arr = np.arange(len(et), dtype=float)
+    wc = s.WatermarkCounter(10, lateness=0, policy="drop").run(et, arr)
+    finals = {r.window: r.count for r in wc.results if r.kind == "final"}
+    assert finals[0] == 2 and wc.dropped == 2          # 3 et 4 arrivent trop tard
+    wc2 = s.WatermarkCounter(10, lateness=0, policy="update").run(et, arr)
+    corr = [r for r in wc2.results if r.kind == "correction"]
+    assert corr[-1].count == 4
+    wc3 = s.WatermarkCounter(10, lateness=20, policy="drop").run(et, arr)
+    assert wc3.dropped == 0
+
+
+def test_jointures():
+    j = s.SearchClickJoin(window=10)
+    for ev in [("search", 1, 0), ("click", 1, 3), ("search", 2, 4), ("click", 3, 5),
+               ("search", 3, 6), ("search", 4, 30)]:
+        j.process(*ev)
+    j.flush()
+    res = {(o[0], o[1]) for o in j.out}
+    assert ("clicked", 1) in res and ("not_clicked", 2) in res and ("clicked", 3) in res
+    out = s.enrich([("profile", "u", "Paris"), ("activity", "u", "a1"), ("profile", "u", "Lyon"),
+                    ("activity", "u", "a2")])
+    assert out == [("u", "a1", "Paris"), ("u", "a2", "Lyon")]
+    tv = s.TimelineView()
+    for ev in [("post", "b", 1), ("follow", "a", "b"), ("post", "b", 2), ("post", "c", 3),
+               ("follow", "a", "c"), ("unfollow", "a", "b"), ("delete_post", "c", 3)]:
+        tv.apply(*ev)
+    assert tv.view() == {}
+    tv.apply("post", "c", 4)
+    assert tv.view() == {"a": {4}}
+
+
+def test_job_a_etat_semantiques():
+    rng = np.random.default_rng(0)
+    keys = list(rng.integers(0, 5, 300))
+    crashes = [37, 120, 205]
+    amo = s.run_stateful_job(keys, "at_most_once", crashes)
+    alo = s.run_stateful_job(keys, "at_least_once", crashes)
+    idem = s.run_stateful_job(keys, "idempotent", crashes)
+    tx = s.run_stateful_job(keys, "transactional", crashes)
+    assert amo["missing"] > 0 and amo["excess"] == 0
+    assert alo["excess"] > 0 and alo["missing"] == 0
+    assert idem["excess"] == idem["missing"] == 0
+    assert tx["excess"] == tx["missing"] == 0
+
+
+def test_fencing_et_young():
+    sink = s.FencedSink(fencing=True)
+    assert sink.write("k", 1, epoch=1)
+    assert sink.write("k", 2, epoch=2)
+    assert not sink.write("k", "zombie", epoch=1)
+    assert sink.data["k"] == 2
+    naive = s.FencedSink(fencing=False)
+    naive.write("k", 2, 2)
+    naive.write("k", "zombie", 1)
+    assert naive.data["k"] == "zombie"
+    assert s.young_interval(2.0, 3600) == pytest.approx(math.sqrt(14400))
