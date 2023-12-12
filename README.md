@@ -78,5 +78,5 @@ Lancer les tests : `pytest tests/`.
 | 9 | [Cohérence et consensus](notebooks/ch09_coherence_et_consensus) | ✅ |
 | | *Partie III - Données dérivées* | |
 | 10 | [Traitement par lots](notebooks/ch10_traitement_par_lots) | ✅ |
-| 11 | Traitement de flux | 🚧 |
+| 11 | [Traitement de flux](notebooks/ch11_traitement_de_flux) | ✅ |
 | 12 | L'avenir des systèmes de données | ⬜ |
