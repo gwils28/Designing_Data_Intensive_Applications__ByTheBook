@@ -120,3 +120,87 @@ def dual_write_divergence(gap: float, jitter: float, n_trials: int = 20_000, see
         x, y = dual_write_trial(rng, gap, jitter, via_log=via_log)
         bad += x != y
     return bad / n_trials
+
+
+def dual_write_divergence_formula(gap: float, jitter: float) -> float:
+    """Probabilité exacte de divergence pour des délais exponentiels de même moyenne.
+
+    La différence de deux exponentielles indépendantes de moyenne j suit une loi de Laplace :
+    P(l'écriture A arrive après B dans un système) = p = exp(-gap/j) / 2 ; les deux
+    systèmes divergent avec probabilité 2 p (1 - p).
+    """
+    p = 0.5 * math.exp(-gap / jitter)
+    return 2 * p * (1 - p)
+
+
+def unfriend_trial(rng: random.Random, gap: float, jitter: float, fix: bool = False,
+                   base: float = 1.0) -> tuple[bool, float]:
+    """Scénario du livre : retrait d'un ami à t=0, puis message méchant à t=gap.
+
+    Les deux événements vivent dans deux journaux différents (amitiés, messages) et
+    arrivent au service de notifications avec des délais indépendants. Sans correctif, le
+    service notifie l'ex-ami s'il voit le message avant le retrait (fuite). Avec correctif,
+    le message porte la version de la liste d'amis vue par l'expéditeur : le service attend
+    d'avoir appliqué cette version avant de notifier.
+    Renvoie (fuite ?, délai de notification du message après son arrivée).
+    """
+    t_unfriend = _delay(rng, base, jitter)
+    t_message = gap + _delay(rng, base, jitter)
+    if not fix:
+        return t_unfriend > t_message, 0.0
+    return False, max(0.0, t_unfriend - t_message)
+
+
+def unfriend_experiment(gaps, jitter: float, n_trials: int = 20_000, seed: int = 0) -> dict[str, np.ndarray]:
+    """Taux de fuite sans correctif, attente moyenne et p99 avec correctif, par écart."""
+    rng = random.Random(seed)
+    leak, wait_mean, wait_p99 = [], [], []
+    for g in gaps:
+        lk = [unfriend_trial(rng, g, jitter)[0] for _ in range(n_trials)]
+        w = np.array([unfriend_trial(rng, g, jitter, fix=True)[1] for _ in range(n_trials)])
+        leak.append(np.mean(lk))
+        wait_mean.append(w.mean())
+        wait_p99.append(np.quantile(w, 0.99))
+    return {"gap": np.asarray(gaps, float), "leak": np.array(leak), "wait_mean": np.array(wait_mean),
+            "wait_p99": np.array(wait_p99)}
+
+
+# ------------------------------------------------------- synchrone contre asynchrone
+def outage_mask(rng: np.random.Generator, n_steps: int, mtbf: float, mttr: float) -> np.ndarray:
+    """Tableau booléen « en panne » par pas de temps : alternance de durées exponentielles
+    de fonctionnement (moyenne mtbf) et de réparation (moyenne mttr)."""
+    down = np.zeros(n_steps, dtype=bool)
+    t = rng.exponential(mtbf)
+    while t < n_steps:
+        d = rng.exponential(mttr)
+        down[int(t):int(min(n_steps, t + d)) + 1] = True
+        t += d + rng.exponential(mtbf)
+    return down
+
+
+def sync_vs_async(n_derived: int = 4, n_steps: int = 30 * 24 * 60, mtbf: float = 5 * 24 * 60,
+                  mttr: float = 60, catch_up: float = 3.0, seed: int = 0) -> dict[str, Any]:
+    """Une base de référence et n systèmes dérivés (pas de temps : 1 minute).
+
+    - synchrone (transaction distribuée) : une écriture n'est acceptée que si la base ET
+      tous les systèmes dérivés sont disponibles ;
+    - asynchrone (journal) : une écriture est acceptée dès que la base est disponible ; un
+      système dérivé en panne accumule un retard qu'il rattrape ensuite à `catch_up` fois
+      le débit d'écriture.
+    Renvoie les taux de refus et le retard (en minutes) de chaque système dérivé.
+    """
+    rng = np.random.default_rng(seed)
+    db_down = outage_mask(rng, n_steps, mtbf, mttr)
+    derived_down = np.array([outage_mask(rng, n_steps, mtbf, mttr) for _ in range(n_derived)])
+    any_down = db_down | derived_down.any(axis=0)
+    lag = np.zeros((n_derived, n_steps))
+    for i in range(n_derived):
+        backlog = 0.0
+        for t in range(n_steps):
+            if not db_down[t]:
+                backlog += 1.0
+            if not derived_down[i, t]:
+                backlog = max(0.0, backlog - catch_up)
+            lag[i, t] = backlog
+    return {"sync_refused": any_down.mean(), "async_refused": db_down.mean(), "lag": lag,
+            "db_down": db_down, "derived_down": derived_down}
