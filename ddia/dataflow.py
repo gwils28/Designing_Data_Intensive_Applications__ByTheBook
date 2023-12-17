@@ -204,3 +204,94 @@ def sync_vs_async(n_derived: int = 4, n_steps: int = 30 * 24 * 60, mtbf: float =
             lag[i, t] = backlog
     return {"sync_refused": any_down.mean(), "async_refused": db_down.mean(), "lag": lag,
             "db_down": db_down, "derived_down": derived_down}
+
+
+# --------------------------------------------------------- index construit en ligne
+def replay_table(changes, upto: int | None = None) -> dict:
+    """État d'une table clé -> valeur après les `upto` premiers changements
+    (("put", clé, valeur) ou ("del", clé, None))."""
+    table = {}
+    for op, k, v in changes[:upto]:
+        if op == "put":
+            table[k] = v
+        else:
+            table.pop(k, None)
+    return table
+
+
+def index_from_table(table: dict) -> dict:
+    """Index secondaire valeur -> liste triée des clés (construit d'un coup)."""
+    idx = defaultdict(set)
+    for k, v in table.items():
+        idx[v].add(k)
+    return {v: sorted(ks) for v, ks in sorted(idx.items())}
+
+
+class IndexBuilder:
+    """Index secondaire dérivé : construit sur un instantané, puis tenu à jour en
+    consommant le journal des changements à partir de l'offset de l'instantané."""
+
+    def __init__(self):
+        self.current: dict = {}          # copie locale clé -> valeur (pour retirer l'ancienne entrée)
+        self.idx: dict = defaultdict(set)
+        self.offset = 0
+        self.applied = 0
+
+    def load_snapshot(self, table: dict, offset: int) -> None:
+        for k, v in table.items():
+            self.current[k] = v
+            self.idx[v].add(k)
+        self.offset = offset
+
+    def apply(self, change) -> None:
+        op, k, v = change
+        old = self.current.pop(k, None)
+        if old is not None:
+            self.idx[old].discard(k)
+            if not self.idx[old]:
+                del self.idx[old]
+        if op == "put":
+            self.current[k] = v
+            self.idx[v].add(k)
+        self.applied += 1
+
+    def catch_up(self, changes, upto: int | None = None) -> None:
+        end = len(changes) if upto is None else upto
+        for c in changes[self.offset:end]:
+            self.apply(c)
+        self.offset = max(self.offset, end)
+
+    def as_dict(self) -> dict:
+        return {v: sorted(ks) for v, ks in sorted(self.idx.items()) if ks}
+
+
+# ----------------------------------------------------------- couplage lâche
+def coupling_sim(mode: str, n_steps: int, rate: float, capacities, outages=None) -> dict[str, np.ndarray]:
+    """Un producteur (débit `rate` par pas) et plusieurs consommateurs.
+
+    capacities : capacité de traitement de chaque consommateur (par pas), ou matrice
+                 (consommateurs x pas) de capacités variables ;
+    outages    : liste (par consommateur) d'intervalles [t0, t1) pendant lesquels il est en
+                 panne (capacité nulle).
+    mode "sync"  : chaque écriture doit être appliquée par tous les consommateurs dans le
+                   même pas (débit accepté = min des capacités disponibles) ;
+    mode "async" : le producteur écrit dans un journal ; chaque consommateur lit à son rythme.
+    Renvoie le débit accepté par pas et le retard (backlog) de chaque consommateur.
+    """
+    caps = np.asarray(capacities, float)
+    outages = outages or [[] for _ in caps]
+    cap_t = caps.copy() if caps.ndim == 2 else np.tile(caps[:, None], (1, n_steps))
+    for i, ivs in enumerate(outages):
+        for t0, t1 in ivs:
+            cap_t[i, t0:t1] = 0.0
+    accepted = np.zeros(n_steps)
+    backlog = np.zeros((len(caps), n_steps))
+    b = np.zeros(len(caps))
+    for t in range(n_steps):
+        if mode == "sync":
+            accepted[t] = min(rate, cap_t[:, t].min())
+        else:
+            accepted[t] = rate
+            b = np.maximum(0.0, b + rate - cap_t[:, t])
+        backlog[:, t] = b
+    return {"accepted": accepted, "backlog": backlog}
