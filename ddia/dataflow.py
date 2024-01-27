@@ -295,3 +295,80 @@ def coupling_sim(mode: str, n_steps: int, rate: float, capacities, outages=None)
             b = np.maximum(0.0, b + rate - cap_t[:, t])
         backlog[:, t] = b
     return {"accepted": accepted, "backlog": backlog}
+
+
+# --------------------------------------------------------- dataflow façon tableur
+class Dataflow:
+    """Graphe de cellules : des entrées et des formules ; modifier une entrée recalcule,
+    dans l'ordre topologique, seulement les cellules qui en dépendent."""
+
+    def __init__(self):
+        self.values: dict[str, Any] = {}
+        self.formulas: dict[str, tuple[Callable, tuple[str, ...]]] = {}
+        self.dependents: dict[str, list[str]] = defaultdict(list)
+        self.recomputations = 0
+        self.order: list[str] = []
+
+    def set(self, name: str, value: Any) -> list[str]:
+        self.values[name] = value
+        return self._propagate(name)
+
+    def define(self, name: str, fn: Callable, *inputs: str) -> None:
+        self.formulas[name] = (fn, inputs)
+        for i in inputs:
+            self.dependents[i].append(name)
+        self._compute(name)
+        self.order.append(name)
+
+    def _compute(self, name: str) -> None:
+        fn, inputs = self.formulas[name]
+        self.values[name] = fn(*(self.values[i] for i in inputs))
+        self.recomputations += 1
+
+    def _propagate(self, name: str) -> list[str]:
+        # ensemble des descendants, recalculés dans l'ordre de définition (topologique)
+        todo, seen = [name], set()
+        while todo:
+            n = todo.pop()
+            for d in self.dependents.get(n, []):
+                if d not in seen:
+                    seen.add(d)
+                    todo.append(d)
+        touched = [n for n in self.order if n in seen]
+        for n in touched:
+            self._compute(n)
+        return touched
+
+    def __getitem__(self, name: str) -> Any:
+        return self.values[name]
+
+
+def make_changelog_db() -> sqlite3.Connection:
+    """Base SQLite dont la table `products` publie ses changements dans une table
+    `changelog` (identifiant croissant) grâce à des déclencheurs : une capture de
+    changements rudimentaire, lisible par offset."""
+    conn = sqlite3.connect(":memory:", isolation_level=None)
+    conn.executescript("""
+        CREATE TABLE products (id INTEGER PRIMARY KEY, name TEXT, price REAL);
+        CREATE TABLE changelog (seq INTEGER PRIMARY KEY AUTOINCREMENT, op TEXT, id INTEGER,
+                                name TEXT, price REAL);
+        CREATE TRIGGER t_ins AFTER INSERT ON products BEGIN
+            INSERT INTO changelog (op, id, name, price) VALUES ('put', NEW.id, NEW.name, NEW.price); END;
+        CREATE TRIGGER t_upd AFTER UPDATE ON products BEGIN
+            INSERT INTO changelog (op, id, name, price) VALUES ('put', NEW.id, NEW.name, NEW.price); END;
+        CREATE TRIGGER t_del AFTER DELETE ON products BEGIN
+            INSERT INTO changelog (op, id, name, price) VALUES ('del', OLD.id, NULL, NULL); END;
+    """)
+    return conn
+
+
+# ------------------------------------------------------- jointure temporelle
+def random_walk_rates(seed: int, horizon: float, mean_interval: float, start: float = 1.10,
+                      vol: float = 0.002) -> tuple[np.ndarray, np.ndarray]:
+    """Instants et valeurs des mises à jour d'un taux de change (marche aléatoire)."""
+    rng = np.random.default_rng(seed)
+    n = int(horizon / mean_interval * 1.5) + 10
+    t = np.cumsum(rng.exponential(mean_interval, n))
+    t = np.concatenate([[0.0], t[t < horizon]])
+    v = start * np.exp(np.cumsum(np.concatenate([[0.0], rng.normal(0, vol, len(t) - 1)])))
+    return t, v
