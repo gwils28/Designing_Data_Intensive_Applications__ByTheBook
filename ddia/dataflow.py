@@ -372,3 +372,87 @@ def random_walk_rates(seed: int, horizon: float, mean_interval: float, start: fl
     t = np.concatenate([[0.0], t[t < horizon]])
     v = start * np.exp(np.cumsum(np.concatenate([[0.0], rng.normal(0, vol, len(t) - 1)])))
     return t, v
+
+
+def asof_join(times: np.ndarray, rate_times: np.ndarray, rate_values: np.ndarray) -> np.ndarray:
+    """Valeur du taux en vigueur à chaque instant (dernière mise à jour <= instant)."""
+    idx = np.searchsorted(rate_times, times, side="right") - 1
+    return rate_values[np.clip(idx, 0, None)]
+
+
+# -------------------------------------------- chemin d'écriture et chemin de lecture
+def make_corpus(n_docs: int, vocab: int = 2000, doc_len: int = 60, zipf_a: float = 1.1,
+                seed: int = 0) -> list[list[int]]:
+    """Documents synthétiques : mots tirés selon une loi de Zipf sur `vocab` termes."""
+    rng = np.random.default_rng(seed)
+    ranks = np.arange(1, vocab + 1)
+    p = ranks ** -zipf_a
+    p /= p.sum()
+    return [list(rng.choice(vocab, size=doc_len, p=p)) for _ in range(n_docs)]
+
+
+def zipf_queries(n: int, n_distinct: int, a: float = 1.0, seed: int = 0) -> np.ndarray:
+    """Identifiants de requêtes (0 = la plus fréquente) suivant une loi de Zipf tronquée."""
+    rng = np.random.default_rng(seed)
+    p = np.arange(1, n_distinct + 1) ** -a
+    p /= p.sum()
+    return rng.choice(n_distinct, size=n, p=p)
+
+
+class InvertedIndex:
+    """Index inversé instrumenté : compte les opérations élémentaires (entrées de listes
+    de postings écrites à l'indexation, lues à la recherche)."""
+
+    def __init__(self):
+        self.postings: dict[int, list[int]] = defaultdict(list)
+        self.write_ops = 0
+        self.read_ops = 0
+
+    def add(self, doc_id: int, words) -> None:
+        for w in sorted(set(words)):
+            self.postings[w].append(doc_id)
+            self.write_ops += 1
+
+    def search_and(self, terms) -> list[int]:
+        lists = sorted((self.postings.get(t, []) for t in set(terms)), key=len)
+        self.read_ops += sum(len(lst) for lst in lists)
+        if not lists:
+            return []
+        res = set(lists[0])
+        for lst in lists[1:]:
+            res &= set(lst)
+        return sorted(res)
+
+
+def grep_search(corpus, terms) -> tuple[list[int], int]:
+    """Recherche sans index : parcourt tous les mots de tous les documents."""
+    ts = set(terms)
+    res, ops = [], 0
+    for i, doc in enumerate(corpus):
+        ops += len(doc)
+        if ts <= set(doc):
+            res.append(i)
+    return res, ops
+
+
+# --------------------------------------------------------- traitement multi-shard
+def reach_scatter_gather(followers: dict, posters, n_shards: int) -> dict[str, Any]:
+    """Nombre de personnes ayant vu une URL = taille de l'union des abonnés de ceux qui
+    l'ont publiée, les listes d'abonnés étant réparties en shards par utilisateur.
+
+    Étape 1 : chaque publication est routée vers le shard qui détient la liste d'abonnés
+    de son auteur ; étape 2 : chaque abonné est routé vers le shard qui le possède, qui
+    déduplique ; étape 3 : les comptes partiels sont additionnés.
+    """
+    def shard(u):
+        return stable_hash(u) % n_shards
+    stage2 = [set() for _ in range(n_shards)]
+    msgs1 = msgs2 = 0
+    for p in posters:
+        msgs1 += 1                      # publication -> shard de l'auteur
+        for f in followers.get(p, ()):
+            stage2[shard(f)].add(f)
+            msgs2 += 1                  # abonné -> shard de l'abonné
+    partial = [len(s) for s in stage2]
+    return {"reach": sum(partial), "messages": msgs1 + msgs2 + n_shards,
+            "max_shard_load": max(partial) if partial else 0, "partial": partial}
