@@ -456,3 +456,90 @@ def reach_scatter_gather(followers: dict, posters, n_shards: int) -> dict[str, A
     partial = [len(s) for s in stage2]
     return {"reach": sum(partial), "messages": msgs1 + msgs2 + n_shards,
             "max_shard_load": max(partial) if partial else 0, "partial": partial}
+
+
+# ------------------------------------------------------ identifiants de requête
+def make_bank_db(accounts: dict[int, float]) -> sqlite3.Connection:
+    conn = sqlite3.connect(":memory:", isolation_level=None)
+    conn.execute("CREATE TABLE accounts (account_id INTEGER PRIMARY KEY, balance REAL NOT NULL)")
+    conn.execute("CREATE TABLE requests (request_id TEXT UNIQUE, src INTEGER, dst INTEGER, amount REAL)")
+    conn.executemany("INSERT INTO accounts VALUES (?, ?)", accounts.items())
+    return conn
+
+
+def transfer(conn: sqlite3.Connection, request_id: str | None, src: int, dst: int, amount: float) -> str:
+    """Virement dans une transaction. Avec request_id : la requête est d'abord inscrite
+    dans `requests` (contrainte UNIQUE) ; un doublon fait échouer l'insertion et annule la
+    transaction. Renvoie "appliqué" ou "doublon ignoré"."""
+    try:
+        conn.execute("BEGIN")
+        if request_id is not None:
+            conn.execute("INSERT INTO requests VALUES (?, ?, ?, ?)", (request_id, src, dst, amount))
+        conn.execute("UPDATE accounts SET balance = balance + ? WHERE account_id = ?", (amount, dst))
+        conn.execute("UPDATE accounts SET balance = balance - ? WHERE account_id = ?", (amount, src))
+        conn.execute("COMMIT")
+        return "appliqué"
+    except sqlite3.IntegrityError:
+        conn.execute("ROLLBACK")
+        return "doublon ignoré"
+
+
+def retrying_client(conn: sqlite3.Connection, n_transfers: int, p_lost_reply: float, use_ids: bool,
+                    max_attempts: int = 5, seed: int = 0, amount: float = 11.0) -> dict[str, Any]:
+    """Un client fait `n_transfers` virements du compte 2 vers le compte 1. La réponse du
+    serveur se perd avec probabilité `p_lost_reply` (le virement, lui, a bien eu lieu) ;
+    le client, qui ne sait pas, réessaie (jusqu'à max_attempts envois)."""
+    rng = random.Random(seed)
+    attempts = 0
+    for i in range(n_transfers):
+        rid = f"req-{seed}-{i}" if use_ids else None
+        for _ in range(max_attempts):
+            attempts += 1
+            transfer(conn, rid, 2, 1, amount)
+            if rng.random() >= p_lost_reply:
+                break
+    bal = dict(conn.execute("SELECT account_id, balance FROM accounts"))
+    return {"intended": n_transfers * amount, "credited": bal[1], "attempts": attempts}
+
+
+def uuid_collision_prob(n: float, bits: int) -> float:
+    """Probabilité d'au moins une collision parmi n identifiants aléatoires de `bits` bits
+    (paradoxe des anniversaires : 1 - exp(-n^2 / 2^(bits+1)))."""
+    return -math.expm1(-n * n / 2.0 ** (bits + 1))
+
+
+# ---------------------------------------------------- argument de bout en bout
+FAULTS = ("aucune", "réseau", "bogue émetteur", "bogue récepteur", "disque")
+SCHEMES = ("sommes par lien (TCP)", "lien + disque", "bout en bout")
+
+
+def _flip(rng: random.Random, buf: bytearray) -> None:
+    i = rng.randrange(len(buf))
+    buf[i] ^= 1 << rng.randrange(8)
+
+
+def e2e_pipeline(payload: bytes, fault: str, rng: random.Random) -> dict[str, bool]:
+    """Fait voyager un enregistrement : application émettrice -> tampon d'envoi -> réseau
+    -> application réceptrice -> disque -> lecture par l'application finale.
+
+    Une faute (au plus une) corrompt un bit à l'étape indiquée. Renvoie, pour chaque
+    mécanisme de vérification, s'il a détecté la corruption, et si la donnée finale est
+    effectivement corrompue.
+    """
+    h_e2e = hashlib.sha256(payload).digest()      # calculé par l'application d'origine
+    buf = bytearray(payload)
+    if fault == "bogue émetteur":                 # bogue dans le code qui prépare l'envoi
+        _flip(rng, buf)
+    crc_link = zlib.crc32(buf)                    # somme de contrôle du lien (TCP)
+    if fault == "réseau":
+        _flip(rng, buf)
+    link_detect = zlib.crc32(buf) != crc_link
+    if fault == "bogue récepteur":                # bogue après la vérification réseau
+        _flip(rng, buf)
+    crc_disk = zlib.crc32(buf)                    # somme de contrôle du bloc disque
+    if fault == "disque":
+        _flip(rng, buf)
+    disk_detect = zlib.crc32(buf) != crc_disk
+    e2e_detect = hashlib.sha256(bytes(buf)).digest() != h_e2e
+    return {"corrompu": bytes(buf) != payload, "sommes par lien (TCP)": link_detect,
+            "lien + disque": link_detect or disk_detect, "bout en bout": e2e_detect}
