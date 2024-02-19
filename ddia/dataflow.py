@@ -729,3 +729,77 @@ class PaymentSystem:
                 "refused": sum(1 for v in self.status.values() if v[0] == "refusé"),
                 "status_dups": sum(len(v) - 1 for v in self.status.values()),
                 "log_events": len(self.log)}
+
+
+# ---------------------------------------------- contraintes souples et coordination
+def overbooking_profit(sold: int, capacity: int, show_prob: float, price: float, bump_cost: float) -> float:
+    """Recette espérée d'un vol de `capacity` places quand on vend `sold` billets : chaque
+    passager se présente avec probabilité show_prob (indépendamment) ; chaque passager
+    refoulé coûte bump_cost (indemnité, excuse)."""
+    from math import comb
+    exp_bumped = sum(comb(sold, k) * show_prob ** k * (1 - show_prob) ** (sold - k) * (k - capacity)
+                     for k in range(capacity + 1, sold + 1))
+    return sold * price - bump_cost * exp_bumped
+
+
+def best_overbooking(capacity: int, show_prob: float, price: float, bump_cost: float,
+                     max_extra: int = 40) -> tuple[int, list[float]]:
+    profits = [overbooking_profit(capacity + e, capacity, show_prob, price, bump_cost) for e in range(max_extra + 1)]
+    return int(np.argmax(profits)), profits
+
+
+def inventory_regions(threshold: float, stock: int = 1000, n_regions: int = 3, rate: float = 1.2,
+                      horizon: float = 1000.0, repl_delay: float = 5.0, partitions=None,
+                      seed: int = 0) -> dict[str, int]:
+    """Vente d'un stock limité depuis plusieurs régions.
+
+    Chaque région connaît les ventes des autres avec un retard `repl_delay`. Tant que son
+    estimation du stock restant dépasse `threshold`, elle vend **sans coordination** ; en
+    dessous, elle passe par une vérification **synchrone** auprès d'un coordinateur, qui
+    échoue si la région est coupée du coordinateur (intervalles `partitions` par région).
+    Renvoie : ventes, survente (excuses pour incohérence), refus pendant une coupure alors
+    qu'il restait du stock (excuses pour indisponibilité), nombre de coordinations.
+    """
+    rng = np.random.default_rng(seed)
+    partitions = partitions or {}
+    orders = []
+    for r in range(n_regions):
+        t = np.cumsum(rng.exponential(1.0 / rate, int(rate * horizon * 1.3) + 10))
+        orders += [(x, r) for x in t[t < horizon]]
+    orders.sort()
+    sale_times: list[list[float]] = [[] for _ in range(n_regions)]
+    sold_true = 0
+    oversold = refused_outage = coordinations = 0
+    for t, r in orders:
+        known = len(sale_times[r]) + sum(bisect.bisect_right(sale_times[r2], t - repl_delay)
+                                         for r2 in range(n_regions) if r2 != r)
+        estimate = stock - known
+        if estimate > threshold:
+            sale_times[r].append(t)
+            sold_true += 1
+            if sold_true > stock:
+                oversold += 1
+            continue
+        coordinations += 1
+        cut = any(a <= t < b for a, b in partitions.get(r, []))
+        if cut:
+            if sold_true < stock:
+                refused_outage += 1
+            continue
+        if sold_true < stock:
+            sale_times[r].append(t)
+            sold_true += 1
+    return {"sold": min(sold_true, stock), "oversold": oversold, "refused_outage": refused_outage,
+            "coordinations": coordinations}
+
+
+# ---------------------------------------------- confiance et vérification
+def scrub_loss_probability(replicas: int, rate: float, interval: float, horizon: float) -> float:
+    """Probabilité de perdre un bloc sur `horizon` quand chaque copie se corrompt
+    silencieusement au taux `rate` et qu'une vérification tous les `interval` répare les
+    copies corrompues à partir d'une copie saine (perte si toutes les copies sont
+    corrompues au sein d'un même intervalle). interval >= horizon : jamais vérifié."""
+    interval = min(interval, horizon)
+    p_int = (-math.expm1(-rate * interval)) ** replicas
+    n = horizon / interval
+    return -math.expm1(n * math.log1p(-p_int)) if p_int < 1 else 1.0
