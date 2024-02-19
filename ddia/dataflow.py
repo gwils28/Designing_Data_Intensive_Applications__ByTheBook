@@ -615,3 +615,117 @@ class _ShardProcessor:
     reserved: dict = field(default_factory=lambda: defaultdict(float))
     seen: set = field(default_factory=set)
     offset: int = 0
+
+
+class PaymentSystem:
+    """Virements entre comptes répartis sur des shards de journal, sans validation
+    atomique : chaque requête (identifiant unique fourni par le client) est ajoutée au
+    shard du compte source ; le processeur de ce shard vérifie le solde disponible,
+    réserve le montant et émet trois événements portant le même identifiant (débit vers
+    son propre shard, crédit vers le shard du destinataire, frais vers le shard des
+    frais), plus un statut. Chaque processeur est déterministe et déduplique par
+    identifiant ; il peut tomber en panne après avoir émis une partie de ses sorties : il
+    reprend alors depuis son dernier point de reprise (état + offset), et rejoue.
+    """
+
+    def __init__(self, balances: dict, n_shards: int = 3, fee: float = 1.0):
+        self.n_shards = n_shards
+        self.fee = fee
+        self.log = Log(n_shards)
+        self.status: dict[str, list[str]] = defaultdict(list)
+        self.procs = []
+        for p in range(n_shards):
+            accts = {a: b for a, b in balances.items() if self.shard(a) == p}
+            if self.shard(FEES) == p:
+                accts.setdefault(FEES, 0.0)
+            self.procs.append(_ShardProcessor(balances=accts))
+        self.initial_total = sum(balances.values()) + (0.0 if FEES in balances else 0.0)
+        self.crashes = 0
+        self.processed_events = 0
+
+    def shard(self, account) -> int:
+        return stable_hash(account) % self.n_shards
+
+    def submit(self, req_id: str, src, dst, amount: float) -> None:
+        self.log.append(src, ("demande", req_id, src, dst, amount), partition=self.shard(src))
+
+    def _outputs(self, proc: _ShardProcessor, ev) -> tuple[list, Callable[[], None]]:
+        """Sorties (shard, événement) et mutation d'état, calculées sans effet de bord."""
+        kind, rid = ev[0], ev[1]
+        if kind == "demande":
+            _, _, src, dst, amt = ev
+            if ("demande", rid) in proc.seen:
+                return [], lambda: None
+            total = amt + self.fee
+            available = proc.balances[src] - proc.reserved[src]
+            if available >= total:
+                outs = [(self.shard(src), ("débit", rid, src, total)),
+                        (self.shard(dst), ("crédit", rid, dst, amt)),
+                        (self.shard(FEES), ("crédit", rid, FEES, self.fee)),
+                        (None, ("statut", rid, "accepté"))]
+
+                def mut():
+                    proc.reserved[src] += total
+                    proc.seen.add(("demande", rid))
+                return outs, mut
+            return [(None, ("statut", rid, "refusé"))], lambda: proc.seen.add(("demande", rid))
+        _, _, acct, amt = ev
+        key = (kind, rid, acct)
+        if key in proc.seen:
+            return [], lambda: None
+
+        def mut():
+            proc.seen.add(key)
+            if kind == "débit":
+                proc.balances[acct] -= amt
+                proc.reserved[acct] -= amt
+            else:
+                proc.balances[acct] += amt
+        return [], mut
+
+    def step(self, p: int, rng: random.Random | None = None, p_crash: float = 0.0) -> bool:
+        """Traite l'événement suivant du shard p ; renvoie False si rien à traiter."""
+        proc = self.procs[p]
+        if proc.offset >= self.log.end_offset(p):
+            return False
+        _, _, ev = self.log.read(p, proc.offset, 1)[0]
+        outs, mut = self._outputs(proc, ev)
+        crash_after = None
+        if rng is not None and rng.random() < p_crash:
+            crash_after = rng.randrange(len(outs) + 1)   # panne après k sorties émises
+        for i, (dest, out) in enumerate(outs):
+            if crash_after is not None and i == crash_after:
+                break
+            if dest is None:
+                self.status[out[1]].append(out[2])
+            else:
+                self.log.append(out[2], out, partition=dest)
+        if crash_after is not None:
+            self.crashes += 1                      # état et offset non validés : on rejouera
+            return True
+        mut()                                      # point de reprise : état + offset ensemble
+        proc.offset += 1
+        self.processed_events += 1
+        return True
+
+    def run(self, seed: int = 0, p_crash: float = 0.0, max_steps: int = 1_000_000) -> None:
+        rng = random.Random(seed)
+        for _ in range(max_steps):
+            pending = [p for p in range(self.n_shards) if self.procs[p].offset < self.log.end_offset(p)]
+            if not pending:
+                return
+            self.step(rng.choice(pending), rng, p_crash)
+
+    def balances(self) -> dict:
+        out = {}
+        for proc in self.procs:
+            out.update(proc.balances)
+        return out
+
+    def check(self) -> dict[str, Any]:
+        bal = self.balances()
+        return {"total": round(sum(bal.values()), 6), "min_balance": min(bal.values()),
+                "accepted": sum(1 for v in self.status.values() if v[0] == "accepté"),
+                "refused": sum(1 for v in self.status.values() if v[0] == "refusé"),
+                "status_dups": sum(len(v) - 1 for v in self.status.values()),
+                "log_events": len(self.log)}
