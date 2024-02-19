@@ -543,3 +543,75 @@ def e2e_pipeline(payload: bytes, fault: str, rng: random.Random) -> dict[str, bo
     e2e_detect = hashlib.sha256(bytes(buf)).digest() != h_e2e
     return {"corrompu": bytes(buf) != payload, "sommes par lien (TCP)": link_detect,
             "lien + disque": link_detect or disk_detect, "bout en bout": e2e_detect}
+
+
+def checksum_detection_matrix(n_trials: int = 200, seed: int = 0) -> dict[tuple[str, str], float]:
+    """Taux de détection de chaque mécanisme pour chaque type de faute."""
+    rng = random.Random(seed)
+    out = {}
+    for f in FAULTS:
+        res = [e2e_pipeline(rng.randbytes(256), f, rng) for _ in range(n_trials)]
+        for s in SCHEMES:
+            out[(f, s)] = float(np.mean([r[s] for r in res]))
+        out[(f, "corrompu")] = float(np.mean([r["corrompu"] for r in res]))
+    return out
+
+
+# ------------------------------------------------- unicité par journal partitionné
+class UsernameShard:
+    """Processeur de flux mono-thread d'une partition : le premier qui réclame un nom
+    dans l'ordre du journal l'obtient, les suivants sont refusés."""
+
+    def __init__(self):
+        self.taken: dict[str, str] = {}
+
+    def process(self, req_id: str, username: str) -> tuple[str, str]:
+        if username in self.taken:
+            return req_id, "refusé"
+        self.taken[username] = req_id
+        return req_id, "accepté"
+
+
+def claim_usernames(requests, n_partitions: int) -> dict[str, Any]:
+    """requests : liste ordonnée (req_id, username). Chaque requête est ajoutée à la
+    partition hash(username) ; chaque partition est consommée séquentiellement."""
+    log = Log(n_partitions)
+    for rid, name in requests:
+        log.append(name, rid)
+    shards = [UsernameShard() for _ in range(n_partitions)]
+    results = {}
+    for p in range(n_partitions):
+        for _, name, rid in log.read(p, 0):
+            results[rid] = shards[p].process(rid, name)[1]
+    owners = defaultdict(list)
+    for rid, name in requests:
+        if results[rid] == "accepté":
+            owners[name].append(rid)
+    return {"results": results, "per_partition": [log.end_offset(p) for p in range(n_partitions)],
+            "duplicates": sum(len(v) - 1 for v in owners.values())}
+
+
+def multi_leader_claims(times, names, n_leaders: int, repl_delay: float, seed: int = 0) -> int:
+    """Réclamations de noms réparties au hasard sur des leaders qui ne voient les noms
+    acceptés par les autres qu'après `repl_delay` : renvoie le nombre de noms attribués à
+    plusieurs personnes."""
+    rng = random.Random(seed)
+    by_name: dict[str, list[tuple[float, int]]] = defaultdict(list)
+    for t, name in sorted(zip(times, names)):
+        leader = rng.randrange(n_leaders)
+        visible = any(l2 == leader or t >= t2 + repl_delay for t2, l2 in by_name[name])
+        if not visible:
+            by_name[name].append((t, leader))
+    return sum(len(v) - 1 for v in by_name.values())
+
+
+# ------------------------------------------- virement multi-shard sans 2PC
+FEES = "frais"
+
+
+@dataclass
+class _ShardProcessor:
+    balances: dict
+    reserved: dict = field(default_factory=lambda: defaultdict(float))
+    seen: set = field(default_factory=set)
+    offset: int = 0
