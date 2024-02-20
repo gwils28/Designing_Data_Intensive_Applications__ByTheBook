@@ -803,3 +803,133 @@ def scrub_loss_probability(replicas: int, rate: float, interval: float, horizon:
     p_int = (-math.expm1(-rate * interval)) ** replicas
     n = horizon / interval
     return -math.expm1(n * math.log1p(-p_int)) if p_int < 1 else 1.0
+
+
+def simulate_scrubbing(n_blocks: int, replicas: int, rate: float, interval: float, horizon: float,
+                       seed: int = 0) -> int:
+    """Simulation (par intervalles) du nombre de blocs perdus parmi n_blocks."""
+    rng = np.random.default_rng(seed)
+    interval = min(interval, horizon)
+    n_int = int(round(horizon / interval))
+    lost = np.zeros(n_blocks, dtype=bool)
+    p = -math.expm1(-rate * interval)
+    for _ in range(n_int):
+        bad = rng.random((n_blocks, replicas)) < p
+        lost |= bad.all(axis=1)
+    return int(lost.sum())
+
+
+class HashChainLog:
+    """Journal d'événements chaîné : chaque entrée contient le hachage de la précédente.
+    Modifier une entrée passée casse la chaîne à partir de cette entrée."""
+
+    GENESIS = "0" * 64
+
+    def __init__(self):
+        self.entries: list[dict] = []
+
+    @staticmethod
+    def _digest(prev: str, payload: str) -> str:
+        return hashlib.sha256((prev + "|" + payload).encode()).hexdigest()
+
+    def append(self, payload: str) -> str:
+        prev = self.entries[-1]["hash"] if self.entries else self.GENESIS
+        h = self._digest(prev, payload)
+        self.entries.append({"payload": payload, "prev": prev, "hash": h})
+        return h
+
+    def head(self) -> str:
+        return self.entries[-1]["hash"] if self.entries else self.GENESIS
+
+    def verify(self) -> int | None:
+        """Indice de la première entrée incohérente, ou None si la chaîne est intacte."""
+        prev = self.GENESIS
+        for i, e in enumerate(self.entries):
+            if e["prev"] != prev or self._digest(prev, e["payload"]) != e["hash"]:
+                return i
+            prev = e["hash"]
+        return None
+
+
+def _h(b: bytes) -> bytes:
+    return hashlib.sha256(b).digest()
+
+
+class MerkleTree:
+    """Arbre de Merkle à la RFC 6962 (transparence des certificats) : feuilles préfixées
+    par 0x00, nœuds internes par 0x01, découpage au plus grand 2^k < n."""
+
+    def __init__(self, leaves):
+        self.leaves = [x if isinstance(x, bytes) else str(x).encode() for x in leaves]
+        self.hash_count = 0
+        self._cache: dict[tuple[int, int], bytes] = {}
+
+    @staticmethod
+    def _split(n: int) -> int:
+        k = 1
+        while k * 2 < n:
+            k *= 2
+        return k
+
+    def node(self, lo: int, hi: int) -> bytes:
+        """Hachage du sous-arbre des feuilles [lo, hi)."""
+        key = (lo, hi)
+        if key in self._cache:
+            return self._cache[key]
+        if hi - lo == 1:
+            h = _h(b"\x00" + self.leaves[lo])
+        else:
+            k = self._split(hi - lo)
+            h = _h(b"\x01" + self.node(lo, lo + k) + self.node(lo + k, hi))
+        self.hash_count += 1
+        self._cache[key] = h
+        return h
+
+    def root(self) -> bytes:
+        return self.node(0, len(self.leaves)) if self.leaves else _h(b"")
+
+    def proof(self, i: int) -> list[tuple[str, bytes]]:
+        """Preuve d'inclusion de la feuille i : hachages frères, de la feuille vers la racine."""
+        path = []
+
+        def rec(lo, hi):
+            if hi - lo == 1:
+                return
+            k = self._split(hi - lo)
+            if i < lo + k:
+                rec(lo, lo + k)
+                path.append(("droite", self.node(lo + k, hi)))
+            else:
+                rec(lo + k, hi)
+                path.append(("gauche", self.node(lo, lo + k)))
+        rec(0, len(self.leaves))
+        return path
+
+    @staticmethod
+    def verify_proof(leaf, proof, root: bytes) -> bool:
+        leaf = leaf if isinstance(leaf, bytes) else str(leaf).encode()
+        h = _h(b"\x00" + leaf)
+        for side, sib in proof:
+            h = _h(b"\x01" + (h + sib if side == "droite" else sib + h))
+        return h == root
+
+    def diff(self, other: "MerkleTree") -> tuple[list[int], int]:
+        """Feuilles qui diffèrent entre deux arbres de même taille, en descendant seulement
+        dans les sous-arbres dont les hachages diffèrent. Renvoie (indices, nombre de
+        comparaisons de hachages)."""
+        assert len(self.leaves) == len(other.leaves)
+        out, comps = [], 0
+
+        def rec(lo, hi):
+            nonlocal comps
+            comps += 1
+            if self.node(lo, hi) == other.node(lo, hi):
+                return
+            if hi - lo == 1:
+                out.append(lo)
+                return
+            k = self._split(hi - lo)
+            rec(lo, lo + k)
+            rec(lo + k, hi)
+        rec(0, len(self.leaves))
+        return out, comps
