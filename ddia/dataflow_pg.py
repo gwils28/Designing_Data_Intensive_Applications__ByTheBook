@@ -102,3 +102,48 @@ def tokenize(text: str | None, stem: bool = True) -> set[str]:
             w = w[:-1]
         out.add(w)
     return out
+
+
+class InvertedIndexView:
+    """Vue dérivée en mémoire : index inversé terme -> ensemble d'identifiants, et compteur
+    de documents par auteur. ``apply`` est idempotent : rejouer un changement ne modifie
+    rien, car on mémorise les termes et l'auteur de chaque document."""
+
+    def __init__(self, tokenizer=tokenize):
+        self.tokenizer = tokenizer
+        self.postings: dict[str, set] = defaultdict(set)
+        self.doc_terms: dict = {}
+        self.doc_author: dict = {}
+
+    def apply(self, change: dict) -> None:
+        row = change["row"]
+        doc_id = row["id"]
+        for term in self.doc_terms.pop(doc_id, set()):
+            self.postings[term].discard(doc_id)
+            if not self.postings[term]:
+                del self.postings[term]
+        self.doc_author.pop(doc_id, None)
+        if change["op"] == "DELETE":
+            return
+        terms = self.tokenizer(row.get("titre")) | self.tokenizer(row.get("corps"))
+        self.doc_terms[doc_id] = terms
+        self.doc_author[doc_id] = row.get("auteur")
+        for term in terms:
+            self.postings[term].add(doc_id)
+
+    def authors(self) -> Counter:
+        return Counter(a for a in self.doc_author.values() if a is not None)
+
+    def search(self, query: str) -> set:
+        terms = self.tokenizer(query)
+        if not terms:
+            return set()
+        return set.intersection(*(self.postings.get(t, set()) for t in terms))
+
+
+def rebuild_index(rows, tokenizer=tokenize) -> InvertedIndexView:
+    """Recalcul complet de la vue à partir des lignes actuelles de la table source."""
+    v = InvertedIndexView(tokenizer)
+    for r in rows:
+        v.apply({"op": "INSERT", "row": r, "old": None})
+    return v
