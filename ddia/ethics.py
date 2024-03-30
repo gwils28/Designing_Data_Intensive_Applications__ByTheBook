@@ -371,3 +371,46 @@ def shadow_profiles(n: int = 5_000, m: int = 4, adoption: float = 0.3, seed: int
     frac = seen.sum() / max(non.sum(), 1)
     mean_k = known[seen].mean() if seen.any() else 0.0
     return float(frac), float(mean_k)
+
+
+def randomized_response(truth: np.ndarray, p: float, rng: np.random.Generator) -> np.ndarray:
+    """Chaque répondant dit la vérité avec probabilité p, sinon répond « oui » ou « non »
+    à pile ou face."""
+    truth = np.asarray(truth)
+    honest = rng.random(truth.size) < p
+    coin = rng.random(truth.size) < 0.5
+    return np.where(honest, truth, coin).astype(int)
+
+
+def rr_estimate(answers: np.ndarray, p: float) -> float:
+    """Estimateur sans biais de la proportion de « oui » réels."""
+    lam = float(np.mean(answers))
+    return (lam - (1 - p) / 2) / p
+
+
+def rr_variance(pi: float, p: float, n: int) -> float:
+    """Variance de l'estimateur : lambda (1 - lambda) / (n p^2), lambda = p pi + (1-p)/2."""
+    lam = p * pi + (1 - p) / 2
+    return lam * (1 - lam) / (n * p * p)
+
+
+def rr_posterior_yes(pi: float, p: float) -> float:
+    """P(vrai « oui » | réponse « oui ») : ce que l'enquêteur apprend d'un « oui »."""
+    yes_given_yes = p + (1 - p) / 2
+    yes_given_no = (1 - p) / 2
+    return pi * yes_given_yes / (pi * yes_given_yes + (1 - pi) * yes_given_no)
+
+
+def breach_exposure(retention_days: float, records_per_day: float = 10_000,
+                    breaches_per_year: float = 0.2, years: int = 10, fraction_leaked: float = 1.0,
+                    n_runs: int = 2_000, seed: int = 0):
+    """Nombre d'enregistrements exposés sur `years` ans quand les fuites arrivent selon un
+    processus de Poisson et emportent `fraction_leaked` du stock conservé (stock en régime
+    permanent = débit x durée de conservation). Renvoie (moyenne, p95, P(au moins une fuite))."""
+    rng = np.random.default_rng(seed)
+    stock = records_per_day * retention_days
+    k = rng.poisson(breaches_per_year * years, size=n_runs)
+    # une personne exposée deux fois ne compte qu'une fois : on borne par le total collecté
+    total = records_per_day * 365 * years + stock
+    exposed = np.minimum(k * stock * fraction_leaked, total)
+    return float(exposed.mean()), float(np.quantile(exposed, 0.95)), float((k > 0).mean())
