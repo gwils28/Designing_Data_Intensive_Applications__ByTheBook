@@ -218,3 +218,73 @@ def credit_spiral(n: int = 5_000, months: int = 120, screening: bool = True, sho
         trace.append(score[:200].copy())
     return {"unemployment": np.array(unemp), "long_term": np.array(longt),
             "scores": np.array(trace), "final_score": score, "employed": employed}
+
+
+def patrol_feedback(true_rates=(1.0, 1.0), init=(11, 10), days: int = 1_000, patrols: int = 10,
+                    policy: str = "proportional", detect: float = 0.1, correct: bool = False,
+                    seed: int = 0) -> np.ndarray:
+    """Allocation de patrouilles guidée par les incidents **enregistrés**.
+
+    Les incidents réels sont identiques en moyenne dans tous les quartiers (`true_rates`),
+    mais on n'enregistre que ceux que voit une patrouille : chaque patrouille découvre un
+    incident avec probabilité ``detect * taux``.
+
+    policy = "proportional" : patrouilles réparties au prorata des incidents enregistrés ;
+    policy = "hotspot" : toutes les patrouilles vont au quartier qui a le plus d'incidents
+    enregistrés. correct=True : chaque incident découvert est pondéré par l'inverse de la
+    part de patrouilles du quartier (correction de l'échantillonnage).
+
+    Renvoie la part (estimée) d'incidents attribuée à chaque quartier, jour par jour.
+    """
+    rng = np.random.default_rng(seed)
+    rates = np.asarray(true_rates, dtype=float)
+    k = len(rates)
+    rec = np.asarray(init, dtype=float).copy()
+    shares = np.zeros((days, k))
+    for d in range(days):
+        if policy == "hotspot":
+            alloc = np.zeros(k, dtype=int)
+            alloc[int(np.argmax(rec))] = patrols
+        else:
+            alloc = rng.multinomial(patrols, rec / rec.sum())
+        found = rng.binomial(alloc, np.clip(detect * rates, 0, 1))
+        if correct:
+            frac = alloc / patrols
+            w = np.where(frac > 0, 1.0 / np.maximum(frac, 1e-12), 0.0) / k
+            rec += found * w
+        else:
+            rec += found
+        shares[d] = rec / rec.sum()
+    return shares
+
+
+def recommender_loop(rounds: int = 300, n_topics: int = 8, epsilon: float = 0.0,
+                     reinforcement: float = 0.02, seed: int = 0) -> np.ndarray:
+    """Recommandeur glouton face à un utilisateur aux goûts presque uniformes.
+
+    À chaque tour, le système montre le thème dont le taux de clic estimé est le plus haut
+    (ou un thème au hasard avec probabilité `epsilon`). L'utilisateur clique avec une
+    probabilité égale à son intérêt pour le thème ; chaque clic renforce cet intérêt de
+    `reinforcement` (l'exposition façonne les goûts). Renvoie un dict : ``pref`` (matrice
+    tours x thèmes de l'intérêt de l'utilisateur) et ``shown`` (thème montré à chaque tour).
+    """
+    rng = np.random.default_rng(seed)
+    pref = np.clip(0.3 + 0.02 * rng.normal(size=n_topics), 0.01, 0.99)
+    shown = np.ones(n_topics)
+    clicks = np.full(n_topics, 0.3)
+    hist = np.zeros((rounds, n_topics))
+    seq = np.zeros(rounds, dtype=int)
+    for t in range(rounds):
+        if rng.random() < epsilon:
+            j = int(rng.integers(n_topics))
+        else:
+            j = int(np.argmax(clicks / shown + 1e-9 * rng.random(n_topics)))
+        shown[j] += 1
+        seq[t] = j
+        if rng.random() < pref[j]:
+            clicks[j] += 1
+            pref[j] = min(0.95, pref[j] + reinforcement)
+            others = np.arange(n_topics) != j
+            pref[others] = np.maximum(0.02, pref[others] - reinforcement / (n_topics - 1))
+        hist[t] = pref
+    return {"pref": hist, "shown": seq}
