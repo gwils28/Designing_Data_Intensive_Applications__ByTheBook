@@ -288,3 +288,86 @@ def recommender_loop(rounds: int = 300, n_topics: int = 8, epsilon: float = 0.0,
             pref[others] = np.maximum(0.02, pref[others] - reinforcement / (n_topics - 1))
         hist[t] = pref
     return {"pref": hist, "shown": seq}
+
+
+# --------------------------------------------------------------------------------------
+# Vie privée
+# --------------------------------------------------------------------------------------
+def make_population(n: int = 100_000, n_zip: int = 400, seed: int = 0) -> pd.DataFrame:
+    """Population synthétique : code postal (tailles très inégales), date de naissance,
+    sexe, plus quelques attributs (dont un attribut sensible, ``condition``)."""
+    rng = np.random.default_rng(seed)
+    sizes = rng.lognormal(mean=0.0, sigma=1.0, size=n_zip)
+    zipc = rng.choice(n_zip, size=n, p=sizes / sizes.sum())
+    year = rng.integers(1940, 2006, size=n)
+    doy = rng.integers(1, 366, size=n)
+    sex = rng.integers(0, 2, size=n)
+    return pd.DataFrame({
+        "zip": 10_000 + zipc, "zip_id": zipc, "year": year, "doy": doy, "sex": sex,
+        "birth": year * 1000 + doy,
+        "age_band": ((2024 - year) // 10) * 10,
+        "runner": (rng.random(n) < 0.15).astype(int),
+        "parent": (rng.random(n) < 0.35).astype(int),
+        "condition": (rng.random(n) < 0.02).astype(int),
+    })
+
+
+def class_sizes(df: pd.DataFrame, cols) -> pd.Series:
+    """Taille de la classe d'équivalence (même valeur des colonnes `cols`) de chaque ligne."""
+    return df.groupby(list(cols))[list(cols)[0]].transform("size")
+
+
+def uniqueness(df: pd.DataFrame, cols) -> float:
+    """Fraction des lignes uniques sur la combinaison de colonnes `cols`."""
+    return float((class_sizes(df, cols) == 1).mean())
+
+
+def k_anonymity(df: pd.DataFrame, cols) -> int:
+    """Plus petite classe d'équivalence : le jeu de données est k-anonyme pour ce k."""
+    return int(class_sizes(df, cols).min())
+
+
+def generalize(df: pd.DataFrame, zip_digits: int = 5, birth: str = "day") -> pd.DataFrame:
+    """Généralise les quasi-identifiants : code postal tronqué (5 à 1 chiffres) et date de
+    naissance au jour (« day »), à l'année (« year ») ou à la décennie (« decade »)."""
+    out = df.copy()
+    out["zip"] = df["zip"] // 10 ** (5 - zip_digits)
+    out["birth"] = {"day": df["year"] * 1000 + df["doy"], "year": df["year"],
+                    "decade": df["year"] // 10 * 10}[birth]
+    return out
+
+
+def linkage_attack(released: pd.DataFrame, public: pd.DataFrame, cols) -> float:
+    """Fraction des lignes publiques qui correspondent à **exactement une** ligne publiée
+    (ré-identification certaine par jointure sur les quasi-identifiants `cols`)."""
+    cnt = released.groupby(list(cols)).size().rename("n").reset_index()
+    m = public.merge(cnt, on=list(cols), how="left")
+    return float((m["n"] == 1).mean())
+
+
+def expected_unique_fraction(pop_per_cell: float, n_combos: float) -> float:
+    """Probabilité qu'une personne soit seule de sa combinaison quand `pop_per_cell`
+    personnes se répartissent uniformément sur `n_combos` combinaisons."""
+    return (1 - 1 / n_combos) ** max(pop_per_cell - 1, 0)
+
+
+def shadow_profiles(n: int = 5_000, m: int = 4, adoption: float = 0.3, seed: int = 0):
+    """Graphe social (Barabási-Albert) ; une fraction `adoption` des personnes utilise le
+    service et téléverse son carnet d'adresses. Renvoie (part des non-utilisateurs connus
+    du service, nombre moyen de contacts connus par non-utilisateur connu)."""
+    import networkx as nx
+
+    g = nx.barabasi_albert_graph(n, m, seed=seed)
+    rng = np.random.default_rng(seed)
+    users = rng.random(n) < adoption
+    known = np.zeros(n, dtype=int)
+    for a, b in g.edges():
+        if users[a] and not users[b]:
+            known[b] += 1
+        if users[b] and not users[a]:
+            known[a] += 1
+    non = ~users
+    seen = non & (known > 0)
+    frac = seen.sum() / max(non.sum(), 1)
+    mean_k = known[seen].mean() if seen.any() else 0.0
+    return float(frac), float(mean_k)
