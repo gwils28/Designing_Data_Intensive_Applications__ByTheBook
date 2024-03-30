@@ -115,3 +115,106 @@ def design_matrix(df: pd.DataFrame, use_group: bool = False, use_zip: bool = Tru
         for j in range(1, k):                      # quartier 0 = référence
             cols.append((z == j).astype(float))
     return np.column_stack(cols)
+
+
+def fit_logistic(X: np.ndarray, y: np.ndarray, l2: float = 1e-3, iters: int = 30) -> np.ndarray:
+    """Régression logistique par la méthode de Newton (moindres carrés repondérés)."""
+    w = np.zeros(X.shape[1])
+    reg = l2 * np.eye(X.shape[1])
+    reg[0, 0] = 0.0
+    for _ in range(iters):
+        p = sigmoid(X @ w)
+        g = X.T @ (p - y) + reg @ w
+        H = (X * (p * (1 - p))[:, None]).T @ X + reg
+        step = np.linalg.solve(H, g)
+        w -= step
+        if np.max(np.abs(step)) < 1e-9:
+            break
+    return w
+
+
+def predict_proba(X: np.ndarray, w: np.ndarray) -> np.ndarray:
+    return sigmoid(X @ w)
+
+
+def group_metrics(y: np.ndarray, score: np.ndarray, group: np.ndarray, threshold: float,
+                  names=("A", "B")) -> pd.DataFrame:
+    """Métriques par groupe pour la décision « accepter si score >= seuil ».
+
+    y = 1 : la personne rembourse réellement (« bon payeur »).
+    - taux d'acceptation ; TPR (bons payeurs acceptés) ; FPR (mauvais payeurs acceptés) ;
+    - taux de refus à tort = 1 - TPR ; précision (PPV) des acceptations.
+    """
+    y, score, group = map(np.asarray, (y, score, group))
+    rows = {}
+    for g, name in enumerate(names):
+        m = group == g
+        acc = score[m] >= threshold
+        yy = y[m]
+        rows[name] = {
+            "effectif": int(m.sum()),
+            "taux de bons payeurs": yy.mean(),
+            "taux d'acceptation": acc.mean(),
+            "TPR (bons acceptés)": acc[yy == 1].mean(),
+            "bons payeurs refusés": 1 - acc[yy == 1].mean(),
+            "FPR (mauvais acceptés)": acc[yy == 0].mean(),
+            "PPV (acceptés qui remboursent)": yy[acc].mean() if acc.any() else float("nan"),
+            "score moyen": score[m].mean(),
+        }
+    out = pd.DataFrame(rows).T
+    return out
+
+
+def calibration_table(y: np.ndarray, score: np.ndarray, group: np.ndarray, bins: int = 8,
+                      names=("A", "B")) -> pd.DataFrame:
+    """Fréquence observée de y = 1 par tranche de score et par groupe."""
+    edges = np.quantile(score, np.linspace(0, 1, bins + 1))
+    edges[0], edges[-1] = -np.inf, np.inf
+    idx = np.digitize(score, edges[1:-1])
+    rows = []
+    for g, name in enumerate(names):
+        for b in range(bins):
+            m = (group == g) & (idx == b)
+            if m.sum() >= 20:
+                rows.append({"groupe": name, "tranche": b, "score moyen": score[m].mean(),
+                             "taux observé": y[m].mean(), "effectif": int(m.sum())})
+    return pd.DataFrame(rows)
+
+
+# --------------------------------------------------------------------------------------
+# Boucles de rétroaction
+# --------------------------------------------------------------------------------------
+def credit_spiral(n: int = 5_000, months: int = 120, screening: bool = True, shock: float = 0.01,
+                  p_lose_job: float = 0.01, p_find_job: float = 0.15, screen_penalty: float = 0.25,
+                  threshold: float = 600, seed: int = 0) -> dict:
+    """Spirale score de crédit / emploi.
+
+    Chaque mois : un coup dur (maladie, accident) frappe avec probabilité `shock` et fait
+    perdre l'emploi ; un emploi se perd aussi avec probabilité `p_lose_job`. Un chômeur
+    manque ses échéances (score -30 par mois), un employé les honore (+5, plafond 850).
+    Un chômeur retrouve un emploi avec probabilité `p_find_job`, multipliée par
+    `screen_penalty` si les employeurs filtrent sur le score et que celui-ci est sous
+    `threshold`.
+
+    Renvoie un dict : ``unemployment`` (taux mensuel), ``long_term`` (part des chômeurs
+    depuis plus de 24 mois), ``scores`` (matrice mois x personnes, échantillon de 200).
+    """
+    rng = np.random.default_rng(seed)
+    score = np.full(n, 720.0)
+    employed = np.ones(n, dtype=bool)
+    spell = np.zeros(n, dtype=int)
+    unemp, longt, trace = [], [], []
+    for _ in range(months):
+        lose = employed & ((rng.random(n) < shock) | (rng.random(n) < p_lose_job))
+        p_find = np.full(n, p_find_job)
+        if screening:
+            p_find = np.where(score < threshold, p_find_job * screen_penalty, p_find_job)
+        find = (~employed) & (rng.random(n) < p_find)
+        employed = (employed & ~lose) | find
+        spell = np.where(employed, 0, spell + 1)
+        score = np.where(employed, np.minimum(850, score + 5), np.maximum(300, score - 30))
+        unemp.append(1 - employed.mean())
+        longt.append((spell > 24).mean())
+        trace.append(score[:200].copy())
+    return {"unemployment": np.array(unemp), "long_term": np.array(longt),
+            "scores": np.array(trace), "final_score": score, "employed": employed}
