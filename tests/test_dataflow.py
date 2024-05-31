@@ -100,3 +100,105 @@ def test_index_inverse_et_grep():
         res, ops = df.grep_search(corpus, terms)
         assert idx.search_and(terms) == res
         assert ops == 200 * 30
+
+
+def test_portee_url():
+    followers = {"a": {1, 2, 3}, "b": {3, 4}, "c": {4, 5, 6}}
+    r = df.reach_scatter_gather(followers, ["a", "b", "c"], n_shards=3)
+    assert r["reach"] == 6
+    assert sum(r["partial"]) == 6
+
+
+def test_identifiants_de_requete():
+    naive = df.retrying_client(df.make_bank_db({1: 0.0, 2: 1000.0}), 50, 0.3, use_ids=False, seed=3)
+    dedup = df.retrying_client(df.make_bank_db({1: 0.0, 2: 1000.0}), 50, 0.3, use_ids=True, seed=3)
+    assert naive["credited"] > naive["intended"]
+    assert dedup["credited"] == dedup["intended"]
+    assert df.uuid_collision_prob(1e9, 122) < 1e-18
+    assert df.uuid_collision_prob(2 ** 16, 32) == pytest.approx(1 - np.exp(-0.5), rel=1e-6)
+
+
+def test_bout_en_bout():
+    m = df.checksum_detection_matrix(n_trials=100, seed=0)
+    assert m[("réseau", "sommes par lien (TCP)")] == 1.0
+    assert m[("bogue émetteur", "sommes par lien (TCP)")] == 0.0
+    assert m[("disque", "lien + disque")] == 1.0
+    assert m[("bogue récepteur", "lien + disque")] == 0.0
+    for f in df.FAULTS[1:]:
+        assert m[(f, "bout en bout")] == 1.0
+    assert m[("aucune", "bout en bout")] == 0.0
+
+
+def test_unicite_par_journal():
+    reqs = [(f"r{i}", f"user{i % 30}") for i in range(100)]
+    r = df.claim_usernames(reqs, 4)
+    assert r["duplicates"] == 0
+    assert sum(v == "accepté" for v in r["results"].values()) == 30
+    assert r["results"]["r0"] == "accepté" and r["results"]["r30"] == "refusé"
+    rng = np.random.default_rng(0)
+    times = np.sort(rng.uniform(0, 100, 400))
+    names = [f"n{x}" for x in rng.integers(0, 100, 400)]
+    assert df.multi_leader_claims(times, names, 3, repl_delay=5.0) > 0
+    assert df.multi_leader_claims(times, names, 1, repl_delay=5.0) == 0
+
+
+@pytest.mark.parametrize("p_crash", [0.0, 0.3])
+def test_virements_multishard(p_crash):
+    rng = random.Random(1)
+    accts = {f"c{i}": 100.0 for i in range(8)}
+    ps = df.PaymentSystem(dict(accts), n_shards=3, fee=1.0)
+    for i in range(200):
+        a, b = rng.sample(sorted(accts), 2)
+        ps.submit(f"req{i}", a, b, float(rng.randint(1, 40)))
+    ps.run(seed=2, p_crash=p_crash)
+    chk = ps.check()
+    assert chk["total"] == pytest.approx(800.0)
+    assert chk["min_balance"] >= 0
+    assert chk["accepted"] + chk["refused"] == 200
+    if p_crash:
+        assert ps.crashes > 0
+
+
+def test_surreservation():
+    best, profits = df.best_overbooking(100, 0.9, 200.0, 600.0)
+    assert 3 <= best <= 15
+    assert profits[best] > profits[0]
+
+
+def test_inventaire_regions():
+    coord = df.inventory_regions(threshold=float("inf"), stock=300, horizon=300, seed=1)
+    free = df.inventory_regions(threshold=0, stock=300, horizon=300, seed=1)
+    assert coord["oversold"] == 0
+    assert free["oversold"] > 0 and free["coordinations"] < coord["coordinations"]
+
+
+def test_verification_periodique():
+    p_no = df.scrub_loss_probability(2, 0.1, 10.0, 10.0)
+    p_scrub = df.scrub_loss_probability(2, 0.1, 0.5, 10.0)
+    assert p_scrub < p_no
+    sim = df.simulate_scrubbing(20_000, 2, 0.1, 0.5, 10.0, seed=0) / 20_000
+    assert sim == pytest.approx(p_scrub, abs=0.01)
+
+
+def test_chaine_de_hachage():
+    log = df.HashChainLog()
+    for i in range(10):
+        log.append(f"evt{i}")
+    assert log.verify() is None
+    log.entries[4]["payload"] = "evt4-falsifié"
+    assert log.verify() == 4
+
+
+@pytest.mark.parametrize("n", [1, 2, 5, 8, 13])
+def test_merkle(n):
+    leaves = [f"x{i}" for i in range(n)]
+    t = df.MerkleTree(leaves)
+    root = t.root()
+    for i in range(n):
+        assert df.MerkleTree.verify_proof(leaves[i], t.proof(i), root)
+    if n > 1:
+        assert not df.MerkleTree.verify_proof("autre", t.proof(0), root)
+    other = list(leaves)
+    other[n // 2] = "corrompu"
+    diff, comps = t.diff(df.MerkleTree(other))
+    assert diff == [n // 2]
