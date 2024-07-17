@@ -8,3 +8,7 @@ nbformat
 nbconvert
 jupytext
 pytest
+# clients des labs Docker
+psycopg[binary]
+redis
+kafka-python-ng

@@ -1,0 +1,25 @@
+# Lab du chapitre « Data Models and Query Languages » : PostgreSQL, JSONB et requêtes récursives.
+# Démarrage : docker compose -f docker/datamodels/compose.yml -p ddia_datamodels up -d
+# Arrêt     : docker compose -f docker/datamodels/compose.yml -p ddia_datamodels down -v
+name: ddia_datamodels
+services:
+  postgres:
+    image: postgres:16
+    container_name: ddia_datamodels_pg
+    environment:
+      POSTGRES_USER: ddia
+      POSTGRES_PASSWORD: ddia
+      POSTGRES_DB: modeles
+    command:
+      - postgres
+      - -c
+      - shared_buffers=256MB
+      - -c
+      - max_wal_size=2GB
+    ports:
+      - "10332:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ddia -d modeles"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
