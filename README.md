@@ -38,9 +38,11 @@ Chaque exercice suit le même plan :
 
 ```
 notebooks/chXX_<theme>/   notebooks de cours (chXX_cours_*), d'exercices (chXX_exercices_*)
+                          et labs sur de vrais systèmes (chXX_lab_*)
 ddia/                     paquet Python : style graphique, diagrammes, diagrammes
                           espace-temps, simulateur de réseau, implémentations « à la
                           main » des mécanismes de chaque chapitre
+docker/                   fichiers docker compose des labs
 tests/                    tests unitaires (pytest)
 tools/                    construction et exécution des notebooks
 ```
@@ -58,6 +60,15 @@ jupyter notebook
 Aucun service externe n'est nécessaire pour les notebooks de cours et d'exercices : tout
 tourne en local, en Python pur (plus SQLite). Les notebooks du dépôt sont fournis **déjà
 exécutés** : sorties et figures sont visibles directement sur GitHub.
+
+Les **labs** confrontent les simulations à de vrais systèmes (PostgreSQL, Kafka, Redis,
+etcd...) lancés avec Docker. Chaque lab indique la commande à utiliser, par exemple :
+
+```bash
+docker compose -f docker/transactions/compose.yml -p ddia_transactions up -d
+# ... exécuter le notebook du lab ...
+docker compose -f docker/transactions/compose.yml -p ddia_transactions down -v
+```
 
 Lancer les tests : `pytest tests/`.
 
@@ -80,3 +91,7 @@ Lancer les tests : `pytest tests/`.
 | 10 | [Traitement par lots](notebooks/ch10_traitement_par_lots) | ✅ |
 | 11 | [Traitement de flux](notebooks/ch11_traitement_de_flux) | ✅ |
 | 12 | [L'avenir des systèmes de données](notebooks/ch12_avenir_des_systemes_de_donnees) | ✅ |
+
+## Labs Docker
+
+- [Chapitre 2 - Lab : tables, JSONB et requêtes récursives dans PostgreSQL](notebooks/ch02_modeles_de_donnees/ch02_lab_postgres_jsonb_et_recursif.ipynb)
