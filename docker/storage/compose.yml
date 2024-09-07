@@ -1,0 +1,27 @@
+# Lab du chapitre « Storage and Retrieval » : PostgreSQL et ses index.
+# Démarrage : docker compose -f docker/storage/compose.yml -p ddia_storage up -d
+# Arrêt     : docker compose -f docker/storage/compose.yml -p ddia_storage down -v
+name: ddia_storage
+services:
+  postgres:
+    image: postgres:16
+    container_name: ddia_storage_pg
+    environment:
+      POSTGRES_USER: ddia
+      POSTGRES_PASSWORD: ddia
+      POSTGRES_DB: stockage
+    command:
+      - postgres
+      - -c
+      - shared_buffers=256MB
+      - -c
+      - max_wal_size=2GB
+      - -c
+      - checkpoint_timeout=30min
+    ports:
+      - "10432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ddia -d stockage"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
