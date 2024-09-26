@@ -36,6 +36,7 @@ Les fonctions réutilisables (journal append-only, index de hachage sur segments
 
 | Notebook | Contenu |
 |---|---|
+| [`ch03_lab_postgres_index.ipynb`](ch03_lab_postgres_index.ipynb) | PostgreSQL 16 : `EXPLAIN ANALYZE` d'un parcours séquentiel ; structure réelle d'un B-tree (`pageinspect`, hauteur, déduplication) ; choix du plan selon la sélectivité (`Bitmap Heap Scan` contre `Seq Scan`) ; index couvrant (`INCLUDE`), index-only scan et carte de visibilité ; octets de WAL par index et *full page writes* ; fragmentation, `VACUUM` et `VACUUM FULL` ; index GIN plein texte |
 
 Démarrage et arrêt (depuis la racine du dépôt) :
 
