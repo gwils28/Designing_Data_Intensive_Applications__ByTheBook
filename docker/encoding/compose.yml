@@ -1,0 +1,25 @@
+# Lab du chapitre « Encoding and Evolution » : évolution de schéma dans PostgreSQL.
+# Démarrage : docker compose -f docker/encoding/compose.yml -p ddia_encoding up -d
+# Arrêt     : docker compose -f docker/encoding/compose.yml -p ddia_encoding down -v
+name: ddia_encoding
+services:
+  postgres:
+    image: postgres:16
+    container_name: ddia_encoding_pg
+    environment:
+      POSTGRES_USER: ddia
+      POSTGRES_PASSWORD: ddia
+      POSTGRES_DB: evolution
+    command:
+      - postgres
+      - -c
+      - shared_buffers=256MB
+      - -c
+      - max_wal_size=2GB
+    ports:
+      - "10532:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ddia -d evolution"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
