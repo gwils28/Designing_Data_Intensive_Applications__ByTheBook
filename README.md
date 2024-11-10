@@ -96,3 +96,4 @@ Lancer les tests : `pytest tests/`.
 
 - [Chapitre 2 - Lab : tables, JSONB et requêtes récursives dans PostgreSQL](notebooks/ch02_modeles_de_donnees/ch02_lab_postgres_jsonb_et_recursif.ipynb)
 - [Chapitre 3 - Lab : les index de PostgreSQL vus de l'intérieur](notebooks/ch03_stockage_et_recherche/ch03_lab_postgres_index.ipynb)
+- [Chapitre 4 - Lab : évolution de schéma dans PostgreSQL](notebooks/ch04_encodage_et_evolution/ch04_lab_postgres_evolution.ipynb)

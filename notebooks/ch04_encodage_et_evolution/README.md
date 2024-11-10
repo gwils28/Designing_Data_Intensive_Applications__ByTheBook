@@ -37,5 +37,6 @@ Les fonctions réutilisables (varints et zigzag, JSON et MessagePack, Protocol B
 
 | Notebook | Contenu |
 |---|---|
+| [`ch04_lab_postgres_evolution.ipynb`](ch04_lab_postgres_evolution.ipynb) | PostgreSQL 16 : `ADD COLUMN` sans réécriture (`attmissingval`, fichier inchangé) ; lignes de deux époques dans les mêmes pages (`pageinspect`) ; changements qui réécrivent (défaut volatil, changement de type) mesurés ; file de verrous d'un `ALTER TABLE` et `lock_timeout` ; documents JSONB de plusieurs versions, réécriture complète contre fusion ; protocole texte contre binaire (`COPY`) |
 
 Démarrage : `docker compose -f docker/encoding/compose.yml -p ddia_encoding up -d` (port 10532) ; arrêt : `docker compose -f docker/encoding/compose.yml -p ddia_encoding down -v`.
