@@ -36,6 +36,7 @@ Les fonctions réutilisables (nœuds leader/suiveur avec époques et contrôleur
 
 | Notebook | Contenu |
 |---|---|
+| [`ch05_lab_replication_postgresql.ipynb`](ch05_lab_replication_postgresql.ipynb) | PostgreSQL 16, un primaire et deux répliques en streaming montées par `pg_basebackup` : état de la réplication, retard mesuré à vide et sous charge, lecture périmée (rejeu suspendu) et « lire ses écritures » par jeton de LSN, niveaux de `synchronous_commit` et suiveur synchrone qui bloque les validations, décodage logique avec `test_decoding`, basculement qui perd des écritures confirmées, split brain |
 
 Démarrage et arrêt (depuis la racine du dépôt ; ports 10632 à 10634) :
 
