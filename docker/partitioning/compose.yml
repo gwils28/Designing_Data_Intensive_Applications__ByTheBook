@@ -1,0 +1,45 @@
+# Lab du chapitre « Sharding » (1re édition : « Partitioning ») : Redis Cluster.
+# Quatre nœuds Redis en mode cluster, sans répliques ; le quatrième est ajouté pendant le lab.
+# Les nœuds utilisent le réseau de l'hôte : ils s'annoncent sur 127.0.0.1, si bien que les
+# redirections MOVED / ASK renvoient vers des adresses joignables depuis le notebook.
+# Ports clients 10701-10704, ports du bus de cluster 10711-10714.
+# Démarrage : docker compose -f docker/partitioning/compose.yml -p ddia_partitioning up -d
+# Arrêt     : docker compose -f docker/partitioning/compose.yml -p ddia_partitioning down -v
+name: ddia_partitioning
+x-redis: &redis
+  image: redis:7-alpine
+  network_mode: host
+  healthcheck:
+    test: ["CMD-SHELL", "redis-cli -p $$REDIS_PORT ping | grep -q PONG"]
+    interval: 2s
+    timeout: 3s
+    retries: 30
+services:
+  redis1:
+    <<: *redis
+    container_name: ddia_partitioning_r1
+    environment: {REDIS_PORT: "10701"}
+    command: ["redis-server", "--port", "10701", "--cluster-port", "10711", "--cluster-enabled", "yes",
+              "--cluster-config-file", "nodes.conf", "--cluster-node-timeout", "5000",
+              "--appendonly", "no", "--save", "", "--bind", "127.0.0.1", "--protected-mode", "no"]
+  redis2:
+    <<: *redis
+    container_name: ddia_partitioning_r2
+    environment: {REDIS_PORT: "10702"}
+    command: ["redis-server", "--port", "10702", "--cluster-port", "10712", "--cluster-enabled", "yes",
+              "--cluster-config-file", "nodes.conf", "--cluster-node-timeout", "5000",
+              "--appendonly", "no", "--save", "", "--bind", "127.0.0.1", "--protected-mode", "no"]
+  redis3:
+    <<: *redis
+    container_name: ddia_partitioning_r3
+    environment: {REDIS_PORT: "10703"}
+    command: ["redis-server", "--port", "10703", "--cluster-port", "10713", "--cluster-enabled", "yes",
+              "--cluster-config-file", "nodes.conf", "--cluster-node-timeout", "5000",
+              "--appendonly", "no", "--save", "", "--bind", "127.0.0.1", "--protected-mode", "no"]
+  redis4:
+    <<: *redis
+    container_name: ddia_partitioning_r4
+    environment: {REDIS_PORT: "10704"}
+    command: ["redis-server", "--port", "10704", "--cluster-port", "10714", "--cluster-enabled", "yes",
+              "--cluster-config-file", "nodes.conf", "--cluster-node-timeout", "5000",
+              "--appendonly", "no", "--save", "", "--bind", "127.0.0.1", "--protected-mode", "no"]
