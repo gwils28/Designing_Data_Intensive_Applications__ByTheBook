@@ -35,6 +35,7 @@ Les fonctions réutilisables (hachage stable, `mix64`, CRC16 et slots de Redis C
 
 | Notebook | Contenu |
 |---|---|
+| [`ch06_lab_redis_cluster.ipynb`](ch06_lab_redis_cluster.ipynb) | Redis Cluster à trois puis quatre maîtres (`docker/partitioning/compose.yml`, ports 10701-10704) : les 16 384 slots comme nombre fixe de partitions (carte et diagramme) ; notre CRC16 identique à `CLUSTER KEYSLOT` sur 1 000 clés, répartition par nœud et par slot (CRC16 contre MD5 et loi de Poisson) ; redirections `MOVED` (diagramme espace-temps), correction slot par slot contre rechargement de la carte, coût d'une redirection ; hash tags, `CROSSSLOT` et transaction locale, point chaud d'un tag de 30 000 clés ; ajout d'un nœud avec `rebalance` : 25 % de clés déplacées contre 75 % pour un modulo ; migration manuelle d'un slot (`IMPORTING` / `MIGRATING`, `MIGRATE`, `ASK` / `ASKING`, puis `MOVED`) ; clé chaude Zipf et compteur salé lus dans `INFO commandstats` |
 
 Démarrage et arrêt (depuis la racine du dépôt) :
 
