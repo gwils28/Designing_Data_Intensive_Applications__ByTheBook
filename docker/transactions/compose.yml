@@ -1,0 +1,22 @@
+# Lab du chapitre Transactions : PostgreSQL pour observer les niveaux d'isolation,
+# MVCC (xmin/xmax) et la validation à deux phases (PREPARE TRANSACTION).
+#
+#   docker compose -f docker/transactions/compose.yml -p ddia_transactions up -d
+#   docker compose -f docker/transactions/compose.yml -p ddia_transactions down -v
+name: ddia_transactions
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: ddia
+      POSTGRES_PASSWORD: ddia
+      POSTGRES_DB: ddia
+    # max_prepared_transactions > 0 : nécessaire pour PREPARE TRANSACTION (2PC)
+    command: ["postgres", "-c", "max_prepared_transactions=10", "-c", "deadlock_timeout=200ms"]
+    ports:
+      - "10832:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ddia -d ddia"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
