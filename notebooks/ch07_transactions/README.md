@@ -40,3 +40,4 @@ docker compose -f docker/transactions/compose.yml -p ddia_transactions down -v
 
 | Notebook | Contenu |
 |---|---|
+| [`ch07_lab_isolation_postgresql.ipynb`](ch07_lab_isolation_postgresql.ipynb) | pas de lecture sale même en `READ UNCOMMITTED` ; lecture biaisée en `READ COMMITTED` et instantané en `REPEATABLE READ` ; `xmin`/`xmax`, pages brutes (`pageinspect`) et `VACUUM` bloqué par une transaction longue ; mises à jour perdues sous charge (8 fils) et quatre remèdes ; write skew des médecins et fantôme de réservation (`40001` en `SERIALIZABLE`) ; interblocage réel (`40P01`) |
