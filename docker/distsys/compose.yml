@@ -1,0 +1,41 @@
+# Lab du chapitre « The Trouble with Distributed Systems » : un verrou à bail dans Redis,
+# un « stockage » Redis séparé, et deux clients (conteneurs) que l'on peut geler avec
+# `docker pause` pour reproduire l'écriture d'un zombie, puis la corriger par des jetons
+# de clôture.
+#
+#   docker compose -f docker/distsys/compose.yml -p ddia_distsys up -d
+#   docker compose -f docker/distsys/compose.yml -p ddia_distsys down -v
+name: ddia_distsys
+services:
+  lock:
+    image: redis:7-alpine
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    ports:
+      - "10901:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      timeout: 3s
+      retries: 20
+  storage:
+    image: redis:7-alpine
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    ports:
+      - "10902:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      timeout: 3s
+      retries: 20
+  worker1:
+    image: redis:7-alpine          # on n'utilise que redis-cli et sh
+    command: ["sleep", "infinity"]
+    volumes:
+      - ./worker.sh:/worker.sh:ro
+    depends_on: [lock, storage]
+  worker2:
+    image: redis:7-alpine
+    command: ["sleep", "infinity"]
+    volumes:
+      - ./worker.sh:/worker.sh:ro
+    depends_on: [lock, storage]
