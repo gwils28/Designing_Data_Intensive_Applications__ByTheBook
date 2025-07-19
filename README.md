@@ -101,3 +101,4 @@ Lancer les tests : `pytest tests/`.
 - [Chapitre 6 - Lab : Redis Cluster, un partitionnement par hachage grandeur nature](notebooks/ch06_partitionnement/ch06_lab_redis_cluster.ipynb)
 - [Chapitre 7 - Lab : niveaux d'isolation réels de PostgreSQL](notebooks/ch07_transactions/ch07_lab_isolation_postgresql.ipynb)
 - [Chapitre 8 - Lab : verrou Redis, pause de processus et jetons de clôture](notebooks/ch08_problemes_systemes_distribues/ch08_lab_verrou_redis_et_clotures.ipynb)
+- [Chapitre 9 - Lab : validation à deux phases avec PostgreSQL](notebooks/ch09_coherence_et_consensus/ch09_lab_2pc_postgresql.ipynb)

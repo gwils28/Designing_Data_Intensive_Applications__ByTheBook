@@ -37,6 +37,7 @@ Les fonctions réutilisables (historiques et vérificateur de linéarisabilité,
 
 | Notebook | Système | Contenu |
 |---|---|---|
+| [`ch09_lab_2pc_postgresql.ipynb`](ch09_lab_2pc_postgresql.ipynb) | PostgreSQL (`docker/transactions/compose.yml`) | validation à deux phases avec `PREPARE TRANSACTION` : coordinateur journalisé entre deux bases, transactions en doute et verrous tenus après une panne du coordinateur, survie à un redémarrage, reprise par le journal, décision heuristique, coût en latence |
 
 Démarrer et arrêter la grappe etcd (ports hôtes 11001 à 11003) :
 
