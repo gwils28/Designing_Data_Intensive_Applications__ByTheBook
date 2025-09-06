@@ -38,6 +38,7 @@ Les fonctions réutilisables (historiques et vérificateur de linéarisabilité,
 | Notebook | Système | Contenu |
 |---|---|---|
 | [`ch09_lab_2pc_postgresql.ipynb`](ch09_lab_2pc_postgresql.ipynb) | PostgreSQL (`docker/transactions/compose.yml`) | validation à deux phases avec `PREPARE TRANSACTION` : coordinateur journalisé entre deux bases, transactions en doute et verrous tenus après une panne du coordinateur, survie à un redémarrage, reprise par le journal, décision heuristique, coût en latence |
+| [`ch09_lab_etcd.ipynb`](ch09_lab_etcd.ipynb) | grappe etcd de 3 nœuds (`docker/consistency/compose.yml`) | révisions et CAS (20 réservations concurrentes, une seule gagne) ; baux et clés éphémères ; verrou dont le bail expire pendant une pause et transaction gardée ; lecture sérialisable périmée et lecture linéarisable impossible sur un nœud isolé, coût des lectures linéarisables ; gel du leader et nouvelle élection ; perte du quorum |
 
 Démarrer et arrêter la grappe etcd (ports hôtes 11001 à 11003) :
 
