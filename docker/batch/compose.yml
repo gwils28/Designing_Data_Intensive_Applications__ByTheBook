@@ -1,0 +1,29 @@
+# Lab du chapitre « Batch Processing » : PostgreSQL comme moteur de traitement par lots
+# (tri externe, agrégation, algorithmes de jointure, chargement en masse, bascule atomique).
+#
+#   docker compose -f docker/batch/compose.yml -p ddia_batch up -d
+#   docker compose -f docker/batch/compose.yml -p ddia_batch down -v
+name: ddia_batch
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: ddia_batch_pg
+    environment:
+      POSTGRES_USER: ddia
+      POSTGRES_PASSWORD: ddia
+      POSTGRES_DB: lots
+    command:
+      - postgres
+      - -c
+      - shared_buffers=256MB
+      - -c
+      - max_wal_size=2GB
+      - -c
+      - max_parallel_workers_per_gather=0
+    ports:
+      - "11132:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ddia -d lots"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
