@@ -1,0 +1,52 @@
+# Labs du chapitre « traitement de flux » : Kafka (journal partitionné) et PostgreSQL
+# (capture des changements par décodage logique).
+#
+#   docker compose -f docker/streams/compose.yml -p ddia_streams up -d
+#   docker compose -f docker/streams/compose.yml -p ddia_streams down -v
+#
+# Ports hôtes : Kafka 11292, PostgreSQL 11232.
+name: ddia_streams
+services:
+  kafka:
+    image: apache/kafka:3.7.0
+    hostname: kafka
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9092,CONTROLLER://0.0.0.0:9093,EXTERNAL://0.0.0.0:19092
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092,EXTERNAL://localhost:11292
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,EXTERNAL:PLAINTEXT
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@localhost:9093
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
+      # nettoyeur de journal réactif, pour observer la compaction et la rétention en quelques secondes
+      KAFKA_LOG_CLEANER_BACKOFF_MS: 1000
+      KAFKA_LOG_RETENTION_CHECK_INTERVAL_MS: 1000
+      KAFKA_LOG_SEGMENT_DELETE_DELAY_MS: 1000
+    ports:
+      - "11292:19092"
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --list"]
+      interval: 3s
+      timeout: 10s
+      retries: 30
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: ddia
+      POSTGRES_PASSWORD: ddia
+      POSTGRES_DB: flux
+    # wal_level=logical : nécessaire au décodage logique (capture des changements)
+    command: ["postgres", "-c", "wal_level=logical", "-c", "max_replication_slots=10", "-c", "max_wal_senders=10"]
+    ports:
+      - "11232:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ddia -d flux"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
