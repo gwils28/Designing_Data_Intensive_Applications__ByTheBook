@@ -104,3 +104,4 @@ Lancer les tests : `pytest tests/`.
 - [Chapitre 9 - Lab : validation à deux phases avec PostgreSQL](notebooks/ch09_coherence_et_consensus/ch09_lab_2pc_postgresql.ipynb)
 - [Chapitre 9 - Lab : consensus et coordination avec etcd](notebooks/ch09_coherence_et_consensus/ch09_lab_etcd.ipynb)
 - [Chapitre 10 - Lab : les algorithmes du traitement par lots dans PostgreSQL](notebooks/ch10_traitement_par_lots/ch10_lab_postgres_lots.ipynb)
+- [Chapitre 11 - Lab : capture des changements avec le décodage logique de PostgreSQL](notebooks/ch11_traitement_de_flux/ch11_lab_cdc_postgresql.ipynb)
