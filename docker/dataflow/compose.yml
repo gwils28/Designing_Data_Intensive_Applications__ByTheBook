@@ -1,0 +1,34 @@
+# Lab du chapitre 13 (1re éd. : 12) : « dégrouper » la base de données.
+# PostgreSQL est le système de référence ; ses changements sont capturés par décodage
+# logique (plugin test_decoding) et appliqués à des vues dérivées dans Redis.
+#
+#   docker compose -f docker/dataflow/compose.yml -p ddia_dataflow up -d
+#   docker compose -f docker/dataflow/compose.yml -p ddia_dataflow down -v
+name: ddia_dataflow
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: ddia
+      POSTGRES_PASSWORD: ddia
+      POSTGRES_DB: ddia
+    # wal_level=logical : nécessaire au décodage logique (capture de changements)
+    command: ["postgres", "-c", "wal_level=logical", "-c", "max_replication_slots=4",
+              "-c", "max_wal_senders=4", "-c", "max_connections=200"]
+    ports:
+      - "11332:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ddia -d ddia"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    ports:
+      - "11379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
