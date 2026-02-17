@@ -44,5 +44,6 @@ Les fonctions réutilisables (journal partitionné, double écriture et divergen
 
 | Notebook | Système | Contenu |
 |---|---|---|
+| [`ch12_lab_degroupage_postgresql.ipynb`](ch12_lab_degroupage_postgresql.ipynb) | PostgreSQL 17 (décodage logique `test_decoding`) + Redis 7 | capture de changements par slot de réplication logique et vues dérivées dans Redis (index inversé, compteurs par auteur), retard pendant un pic et journal retenu par le slot ; panne du consommateur, relivraison, idempotence contre compteur naïf ; `CREATE INDEX CONCURRENTLY` sous écritures (instantané puis rattrapage) ; audit de bout en bout qui détecte un bogue de dérivation, retraitement dans une nouvelle vue et bascule progressive ; identifiants de requête de bout en bout contre relances de virements, double soumission (diagramme espace-temps) ; unicité des noms d'utilisateur : lire puis insérer en `READ COMMITTED` ou `SERIALIZABLE`, contrainte `UNIQUE`, journal traité séquentiellement |
 
 Démarrer les services avec `docker compose -f docker/dataflow/compose.yml -p ddia_dataflow up -d` (ports 11332 et 11379), puis les arrêter avec `docker compose -f docker/dataflow/compose.yml -p ddia_dataflow down -v`.

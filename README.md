@@ -106,3 +106,4 @@ Lancer les tests : `pytest tests/`.
 - [Chapitre 10 - Lab : les algorithmes du traitement par lots dans PostgreSQL](notebooks/ch10_traitement_par_lots/ch10_lab_postgres_lots.ipynb)
 - [Chapitre 11 - Lab : capture des changements avec le décodage logique de PostgreSQL](notebooks/ch11_traitement_de_flux/ch11_lab_cdc_postgresql.ipynb)
 - [Chapitre 11 - Lab : un journal partitionné réel avec Kafka](notebooks/ch11_traitement_de_flux/ch11_lab_kafka.ipynb)
+- [Chapitre 12 - Lab : dégrouper la base avec PostgreSQL et Redis](notebooks/ch12_avenir_des_systemes_de_donnees/ch12_lab_degroupage_postgresql.ipynb)
