@@ -1,9 +1,15 @@
 # Designing Data-Intensive Applications - *By The Book*
 
-Notebooks Jupyter pédagogiques qui accompagnent la lecture de **Designing Data-Intensive Applications** (Martin Kleppmann, O'Reilly, 2017) :
+Notebooks Jupyter pédagogiques qui accompagnent la lecture de **Designing Data-Intensive Applications** (Martin Kleppmann et Chris Riccomini, O'Reilly, 2e édition, 2026) :
 cours illustrés, implémentations « à la main » des structures et des protocoles qui font
 fonctionner les bases de données et les systèmes distribués, simulations, diagrammes
 d'architecture et **exercices corrigés en détail**, chapitre par chapitre.
+
+Le dépôt a d'abord suivi la 1re édition du livre (2017, 12 chapitres). Il a été
+réorganisé en 2026 selon la 2e édition (14 chapitres), et complété par les notions
+qu'elle introduit : architectures cloud native, index vectoriels, DataFrames, sync
+engines et logiciels local-first, exécution durable, méthodes formelles et tests
+aléatoires, GraphQL, cadre légal...
 
 ## Objectif et public
 
@@ -77,20 +83,22 @@ Lancer les tests : `pytest tests/`.
 | Chapitre | Thème | Statut |
 |---|---|---|
 | | *Partie I - Fondements des systèmes de données* | |
-| 1 | [Applications fiables, scalables et maintenables](notebooks/ch01_fiabilite_scalabilite_maintenabilite) | ✅ |
-| 2 | [Modèles de données et langages de requête](notebooks/ch02_modeles_de_donnees) | ✅ |
-| 3 | [Stockage et recherche](notebooks/ch03_stockage_et_recherche) | ✅ |
-| 4 | [Encodage et évolution](notebooks/ch04_encodage_et_evolution) | ✅ |
+| 1 | Compromis dans l'architecture des systèmes de données | ⬜ |
+| 2 | Définir les exigences non fonctionnelles | 🚧 |
+| 3 | Modèles de données et langages de requête | 🚧 |
+| 4 | Stockage et recherche | 🚧 |
+| 5 | Encodage et évolution | 🚧 |
 | | *Partie II - Données distribuées* | |
-| 5 | [Réplication](notebooks/ch05_replication) | ✅ |
-| 6 | [Partitionnement](notebooks/ch06_partitionnement) | ✅ |
-| 7 | [Transactions](notebooks/ch07_transactions) | ✅ |
-| 8 | [Les problèmes des systèmes distribués](notebooks/ch08_problemes_systemes_distribues) | ✅ |
-| 9 | [Cohérence et consensus](notebooks/ch09_coherence_et_consensus) | ✅ |
+| 6 | Réplication | 🚧 |
+| 7 | Sharding | 🚧 |
+| 8 | Transactions | 🚧 |
+| 9 | Les problèmes des systèmes distribués | 🚧 |
+| 10 | Cohérence et consensus | 🚧 |
 | | *Partie III - Données dérivées* | |
-| 10 | [Traitement par lots](notebooks/ch10_traitement_par_lots) | ✅ |
-| 11 | [Traitement de flux](notebooks/ch11_traitement_de_flux) | ✅ |
-| 12 | [L'avenir des systèmes de données](notebooks/ch12_avenir_des_systemes_de_donnees) | ✅ |
+| 11 | Traitement par lots | 🚧 |
+| 12 | Traitement de flux | 🚧 |
+| 13 | Une philosophie des systèmes de streaming | 🚧 |
+| 14 | Faire ce qui est juste | 🚧 |
 
 ## Labs Docker
 
