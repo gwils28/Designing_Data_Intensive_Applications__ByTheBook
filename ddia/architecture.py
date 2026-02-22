@@ -294,3 +294,73 @@ class LRUCache:
     def hit_ratio(self) -> float:
         n = self.hits + self.misses
         return self.hits / n if n else 0.0
+
+
+def zipf_keys(n_keys: int, n: int, s: float = 1.0, seed: int = 0) -> np.ndarray:
+    """Suite de `n` accès à des clés 0..n_keys-1 de popularité en loi de Zipf d'exposant s."""
+    rng = np.random.default_rng(seed)
+    w = 1.0 / np.arange(1, n_keys + 1) ** s
+    return rng.choice(n_keys, n, p=w / w.sum())
+
+
+def token_bucket(times, rate: float, burst: float) -> np.ndarray:
+    """Seau à jetons : masque des requêtes admises (taux `rate` par seconde, rafale `burst`)."""
+    tokens, last = float(burst), None
+    ok = np.zeros(len(times), dtype=bool)
+    for i, t in enumerate(times):
+        if last is not None:
+            tokens = min(burst, tokens + (t - last) * rate)
+        last = t
+        if tokens >= 1.0:
+            tokens -= 1.0
+            ok[i] = True
+    return ok
+
+
+# ====================================================================================
+# 4. Distribué ou mono-nœud
+# ====================================================================================
+
+CITIES = {
+    "Paris": (48.86, 2.35), "Francfort": (50.11, 8.68), "Londres": (51.51, -0.13),
+    "New York": (40.71, -74.01), "São Paulo": (-23.55, -46.63), "Singapour": (1.35, 103.82),
+    "Tokyo": (35.68, 139.69), "Sydney": (-33.87, 151.21), "Virginie": (38.95, -77.45),
+    "Californie": (37.37, -121.92), "Bombay": (19.08, 72.88), "Johannesburg": (-26.20, 28.05),
+}
+
+
+def haversine_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+    """Distance orthodromique (sur la sphère terrestre) en kilomètres."""
+    r = 6371.0
+    p1, p2 = math.radians(lat1), math.radians(lat2)
+    dp, dl = p2 - p1, math.radians(lon2 - lon1)
+    a = math.sin(dp / 2) ** 2 + math.cos(p1) * math.cos(p2) * math.sin(dl / 2) ** 2
+    return 2 * r * math.asin(math.sqrt(a))
+
+
+def fiber_rtt_ms(km: float, stretch: float = 1.5) -> float:
+    """Aller-retour minimal sur fibre (lumière à ~200 000 km/s), le câble étant `stretch`
+    fois plus long que la distance à vol d'oiseau."""
+    return 2 * km * stretch / 200_000 * 1000
+
+
+def cluster_time(n, t_single: float, overhead: float = 5.0, sync: float = 0.0):
+    """Temps d'un calcul sur n nœuds : un système distribué fait `overhead` fois plus de
+    travail total qu'un bon programme mono-thread (sérialisation, coordination, code
+    générique), réparti sur n nœuds, plus un coût de synchronisation `sync * log2(n)`."""
+    n = np.asarray(n, dtype=float)
+    return overhead * t_single / n + sync * np.log2(np.maximum(n, 1))
+
+
+def cost_metric(ns, times, t_single: float):
+    """Métrique COST (McSherry et al.) : plus petite configuration qui bat le programme
+    mono-thread de référence (temps t_single) ; None si aucune ne le bat."""
+    for n, t in zip(ns, times):
+        if t < t_single:
+            return n
+    return None
+
+
+def chain_availability(avails) -> float:
+    """Disponibilité d'une chaîne de services tous nécessaires (pannes indépendantes)."""
+    return float(np.prod(np.asarray(avails, dtype=float)))
