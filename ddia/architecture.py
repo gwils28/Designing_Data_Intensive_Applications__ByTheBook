@@ -364,3 +364,76 @@ def cost_metric(ns, times, t_single: float):
 def chain_availability(avails) -> float:
     """Disponibilité d'une chaîne de services tous nécessaires (pannes indépendantes)."""
     return float(np.prod(np.asarray(avails, dtype=float)))
+
+
+def critical_path(spans: dict, root: str) -> list:
+    """Chemin critique d'une trace distribuée.
+
+    spans : {nom: (parent, début, fin)} (parent None pour la racine). En partant de la fin
+    de la racine, on remonte le temps : à chaque instant, l'enfant terminé le plus tard
+    est celui qu'on attendait ; on descend dans cet enfant, puis on continue avant son début.
+    Renvoie la liste des spans (feuilles et intermédiaires) sur le chemin, dans l'ordre
+    chronologique.
+    """
+    children: dict = {}
+    for name, (parent, t0, t1) in spans.items():
+        children.setdefault(parent, []).append(name)
+
+    def walk(name):
+        _, t0, t1 = spans[name]
+        path = []
+        cur = t1
+        kids = sorted(children.get(name, []), key=lambda k: spans[k][2], reverse=True)
+        while True:
+            cand = [k for k in kids if spans[k][2] <= cur + 1e-12 and spans[k][1] >= t0 - 1e-12]
+            if not cand:
+                break
+            k = max(cand, key=lambda k: spans[k][2])
+            path = walk(k) + path
+            cur = spans[k][1]
+            kids = [x for x in kids if spans[x][2] <= cur + 1e-12]
+        return [name] + path
+
+    return walk(root)
+
+
+def simulate_serverless(arrivals, exec_time: float, keep_alive: float, cold_start: float) -> dict:
+    """Plateforme « function as a service » simplifiée.
+
+    Chaque requête va sur une instance chaude libre (libérée depuis moins de
+    `keep_alive`) si possible ; sinon une nouvelle instance démarre à froid (latence
+    `cold_start` en plus). Renvoie la fraction de démarrages à froid, les latences, le
+    temps facturé (exécution seulement) et le temps d'instance réellement occupé par la
+    plateforme (y compris les instances chaudes inactives).
+    """
+    arrivals = np.asarray(arrivals, dtype=float)
+    free = []          # instances libres : instants de libération
+    busy = []          # tas des instants de fin des instances occupées
+    lat = np.empty(arrivals.size)
+    cold = np.zeros(arrivals.size, dtype=bool)
+    inst_time = 0.0
+    for i, t in enumerate(arrivals):
+        while busy and busy[0] <= t:
+            free.append(heapq.heappop(busy))
+        # les instances libres depuis trop longtemps sont arrêtées
+        keep = []
+        for f in free:
+            if t - f > keep_alive:
+                inst_time += keep_alive
+            else:
+                keep.append(f)
+        free = keep
+        if free:
+            f = max(free)                                 # la plus récemment libérée
+            free.remove(f)
+            inst_time += t - f
+            dur = exec_time
+        else:
+            cold[i] = True
+            dur = cold_start + exec_time
+        lat[i] = dur
+        inst_time += dur
+        heapq.heappush(busy, t + dur)
+    inst_time += keep_alive * (len(free) + len(busy))   # inactivité finale avant arrêt
+    return {"cold_fraction": float(cold.mean()) if arrivals.size else 0.0, "latency": lat,
+            "cold": cold, "billed": exec_time * arrivals.size, "instance_time": inst_time}
