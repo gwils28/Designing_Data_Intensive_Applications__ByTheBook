@@ -203,3 +203,94 @@ def load_profile(hours: int = 24 * 7, mean: float = 100.0, peak_ratio: float = 3
     rng = np.random.default_rng(seed)
     shape = shape * rng.lognormal(0.0, noise, hours)
     return mean * shape / shape.mean()
+
+
+def servers_needed(load, capacity: float, headroom: float = 0.0) -> np.ndarray:
+    """Nombre de serveurs de capacité `capacity` pour servir `load` avec une marge."""
+    return np.maximum(1, np.ceil(np.asarray(load, dtype=float) * (1 + headroom) / capacity)).astype(int)
+
+
+def cost_self_hosted(load, capacity: float, server_month: float, ops_month: float,
+                     headroom: float = 0.3, hours_per_month: float = 730.0) -> float:
+    """Coût mensuel d'une flotte possédée, dimensionnée pour le pic (+ marge).
+
+    server_month : coût mensuel amorti d'un serveur (achat, hébergement, électricité) ;
+    ops_month : coût mensuel de l'équipe d'exploitation imputé à ce système.
+    """
+    n = int(servers_needed(np.max(load), capacity, headroom))
+    return n * server_month + ops_month
+
+
+def cost_cloud(load, capacity: float, instance_hour: float, ops_month: float = 0.0,
+               headroom: float = 0.3, autoscale: bool = True, hours_per_month: float = 730.0) -> float:
+    """Coût mensuel en instances à l'heure (charge horaire `load`).
+
+    autoscale=True : on paie heure par heure le nombre d'instances nécessaire ;
+    autoscale=False : flotte fixe dimensionnée pour le pic, comme en auto-hébergement.
+    """
+    load = np.asarray(load, dtype=float)
+    if autoscale:
+        inst_hours = servers_needed(load, capacity, headroom).sum() * hours_per_month / load.size
+    else:
+        inst_hours = int(servers_needed(load.max(), capacity, headroom)) * hours_per_month
+    return inst_hours * instance_hour + ops_month
+
+
+#: ordres de grandeur (latence du premier octet en s, débit d'un flux en octets/s)
+STORAGE_TIERS = {
+    "RAM locale": (1e-7, 10e9),
+    "SSD NVMe local": (1e-4, 2e9),
+    "disque virtuel réseau": (1e-3, 250e6),
+    "object store": (3e-2, 100e6),
+    "object store (autre région)": (1e-1, 50e6),
+}
+
+
+def transfer_time(size_bytes, latency: float, bandwidth: float):
+    """Temps pour lire `size_bytes` : latence du premier octet + taille / débit."""
+    return latency + np.asarray(size_bytes, dtype=float) / bandwidth
+
+
+def object_store_monthly_cost(total_bytes: float, object_bytes: float, reads_per_month: float = 1.0,
+                              gb_month: float = 0.023, put_per_1000: float = 0.005,
+                              get_per_1000: float = 0.0004) -> dict:
+    """Coût mensuel d'un jeu de données découpé en objets de `object_bytes` octets.
+
+    Le jeu est réécrit une fois par mois (un PUT par objet) et lu en entier
+    `reads_per_month` fois (un GET par objet). Tarifs : ordres de grandeur publics d'un
+    object store en 2025, à titre indicatif.
+    """
+    n = math.ceil(total_bytes / object_bytes)
+    stockage = total_bytes / 1e9 * gb_month
+    ecritures = n / 1000 * put_per_1000
+    lectures = n * reads_per_month / 1000 * get_per_1000
+    return {"objets": n, "stockage": stockage, "ecritures": ecritures, "lectures": lectures,
+            "total": stockage + ecritures + lectures}
+
+
+class LRUCache:
+    """Cache LRU de capacité fixe (en nombre d'entrées), avec compteurs."""
+
+    def __init__(self, capacity: int):
+        self.capacity = capacity
+        self.data: OrderedDict = OrderedDict()
+        self.hits = 0
+        self.misses = 0
+
+    def get(self, key) -> bool:
+        """Accède à `key` ; renvoie True si présent (hit), sinon l'insère (miss)."""
+        if key in self.data:
+            self.data.move_to_end(key)
+            self.hits += 1
+            return True
+        self.misses += 1
+        if self.capacity > 0:
+            self.data[key] = True
+            if len(self.data) > self.capacity:
+                self.data.popitem(last=False)
+        return False
+
+    @property
+    def hit_ratio(self) -> float:
+        n = self.hits + self.misses
+        return self.hits / n if n else 0.0
