@@ -437,3 +437,96 @@ def simulate_serverless(arrivals, exec_time: float, keep_alive: float, cold_star
     inst_time += keep_alive * (len(free) + len(busy))   # inactivité finale avant arrêt
     return {"cold_fraction": float(cold.mean()) if arrivals.size else 0.0, "latency": lat,
             "cold": cold, "billed": exec_time * arrivals.size, "instance_time": inst_time}
+
+
+def young_daly_interval(ckpt_cost: float, mtbf: float) -> float:
+    """Intervalle de points de reprise optimal au premier ordre : sqrt(2 C M)."""
+    return math.sqrt(2 * ckpt_cost * mtbf)
+
+
+def simulate_checkpointing(work: float, interval: float, ckpt_cost: float, restart_cost: float,
+                           mtbf: float, seed: int = 0) -> float:
+    """Durée réelle d'un calcul de `work` heures découpé en segments de `interval` suivis
+    d'un point de reprise (coût `ckpt_cost`). Les pannes (exponentielles, moyenne `mtbf`)
+    font perdre le segment en cours et coûtent `restart_cost`. Renvoie la durée totale."""
+    rng = np.random.default_rng(seed)
+    t = 0.0
+    done = 0.0
+    next_fail = rng.exponential(mtbf)
+    while done < work - 1e-12:
+        seg = min(interval, work - done)
+        need = seg + (ckpt_cost if done + seg < work - 1e-12 else 0.0)
+        if t + need <= next_fail:
+            t += need
+            done += seg
+        else:
+            t = next_fail + restart_cost
+            next_fail = t + rng.exponential(mtbf)
+    return t
+
+
+# ====================================================================================
+# 5. Données, droit et société
+# ====================================================================================
+
+def keystream(key: bytes, n: int) -> bytes:
+    """Flot pseudo-aléatoire de n octets dérivé de `key` (SHA-256 en mode compteur).
+    Pédagogique : ne pas utiliser comme chiffrement réel."""
+    out = bytearray()
+    counter = 0
+    while len(out) < n:
+        out += hashlib.sha256(key + counter.to_bytes(8, "big")).digest()
+        counter += 1
+    return bytes(out[:n])
+
+
+def xor_cipher(key: bytes, data: bytes) -> bytes:
+    """Chiffre ou déchiffre (opération symétrique) `data` avec le flot de `key`."""
+    ks = keystream(key, len(data))
+    return bytes(a ^ b for a, b in zip(data, ks))
+
+
+class ShreddableLog:
+    """Journal en ajout seul dont chaque utilisateur a sa propre clé de chiffrement.
+
+    Effacer un utilisateur = détruire sa clé (« crypto-shredding ») : ses entrées restent
+    dans le journal immuable mais deviennent illisibles, sans réécrire un seul octet.
+    """
+
+    def __init__(self, seed: int = 0):
+        self.entries: list = []          # (utilisateur, octets chiffrés), immuable
+        self.keys: dict = {}
+        self._rng = np.random.default_rng(seed)
+
+    def append(self, user: str, payload: str) -> None:
+        if user not in self.keys:
+            self.keys[user] = bytes(self._rng.integers(0, 256, 32, dtype=np.uint8).tolist())
+        self.entries.append((user, xor_cipher(self.keys[user], payload.encode("utf-8"))))
+
+    def forget(self, user: str) -> int:
+        """Détruit la clé de `user` ; renvoie le nombre d'octets réécrits dans le journal (0)."""
+        self.keys.pop(user, None)
+        return 0
+
+    def read(self) -> list:
+        """Entrées lisibles (utilisateur, texte) ; celles dont la clé est détruite sont omises."""
+        out = []
+        for user, blob in self.entries:
+            key = self.keys.get(user)
+            if key is not None:
+                out.append((user, xor_cipher(key, blob).decode("utf-8")))
+        return out
+
+    @property
+    def size_bytes(self) -> int:
+        return sum(len(b) for _, b in self.entries)
+
+
+def compact_without(entries, user: str):
+    """Réécrit un journal en omettant les entrées de `user` (effacement par compaction).
+
+    entries : liste de (utilisateur, contenu en octets ou texte). Renvoie (nouveau
+    journal, nombre d'octets réécrits)."""
+    kept = [(u, p) for u, p in entries if u != user]
+    rewritten = sum(len(p) for _, p in kept)
+    return kept, rewritten
