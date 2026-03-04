@@ -85,3 +85,104 @@ def test_couts_cloud_et_auto_hebergement():
     auto = ar.cost_cloud(load, capacity=10, instance_hour=1, headroom=0, autoscale=True)
     assert fixed == pytest.approx(9 * 730)
     assert auto == pytest.approx((1 + 1 + 1 + 9) / 4 * 730)
+
+
+def test_couches_de_stockage_et_object_store():
+    lat, bw = ar.STORAGE_TIERS["object store"]
+    assert ar.transfer_time(0, lat, bw) == pytest.approx(lat)
+    assert ar.transfer_time(bw, lat, bw) == pytest.approx(lat + 1)
+    small = ar.object_store_monthly_cost(1e12, 1e3)
+    big = ar.object_store_monthly_cost(1e12, 1e8)
+    assert small["objets"] == 10**9 and big["objets"] == 10**4
+    assert small["stockage"] == pytest.approx(big["stockage"])
+    assert small["total"] > 100 * big["total"]
+
+
+def test_cache_lru():
+    c = ar.LRUCache(2)
+    assert [c.get(k) for k in "abacb"] == [False, False, True, False, False]
+    assert c.hits == 1 and c.misses == 4
+    keys = ar.zipf_keys(1000, 20_000, s=1.0, seed=0)
+    big, small = ar.LRUCache(200), ar.LRUCache(20)
+    for k in keys:
+        big.get(int(k)); small.get(int(k))
+    assert big.hit_ratio > small.hit_ratio > 0.2
+
+
+def test_seau_a_jetons():
+    t = np.arange(0, 10, 0.1)               # 10 requêtes par seconde pendant 10 s
+    ok = ar.token_bucket(t, rate=2.0, burst=5)
+    assert ok[:5].all()
+    assert ok.sum() == pytest.approx(5 + 2 * 10, abs=2)
+
+
+# --- distribué ou mono-nœud -----------------------------------------------------------
+
+def test_distances_et_rtt():
+    p, ny = ar.CITIES["Paris"], ar.CITIES["New York"]
+    d = ar.haversine_km(*p, *ny)
+    assert 5800 < d < 5900
+    assert ar.fiber_rtt_ms(1000, stretch=1.0) == pytest.approx(10.0)
+
+
+def test_cluster_et_cost():
+    ns = [1, 2, 4, 8, 16]
+    t = ar.cluster_time(ns, t_single=100, overhead=5)
+    assert t[0] == pytest.approx(500)
+    assert ar.cost_metric(ns, t, 100) == 8
+    assert ar.cost_metric(ns, t, 1) is None
+
+
+def test_disponibilite_chaine():
+    assert ar.chain_availability([0.999] * 10) == pytest.approx(0.999**10)
+
+
+def test_chemin_critique():
+    spans = {"req": (None, 0, 10), "auth": ("req", 0, 2), "cache": ("req", 0.5, 1),
+             "db": ("req", 2, 9), "disque": ("db", 3, 8)}
+    assert ar.critical_path(spans, "req") == ["req", "auth", "db", "disque"]
+
+
+def test_serverless():
+    # requêtes très espacées : toujours à froid ; très rapprochées : presque jamais
+    r = ar.simulate_serverless(np.arange(0, 1000, 100.0), 0.1, keep_alive=10, cold_start=1)
+    assert r["cold_fraction"] == 1.0
+    r = ar.simulate_serverless(np.arange(0, 100, 1.0), 0.1, keep_alive=10, cold_start=1)
+    # la 1re requête démarre à froid (1,1 s) : la 2e arrive pendant ce temps, à froid aussi
+    assert r["cold"].sum() == 2
+    assert r["billed"] == pytest.approx(10.0)
+    assert r["instance_time"] > r["billed"]
+
+
+def test_points_de_reprise():
+    assert ar.young_daly_interval(0.5, 100) == pytest.approx(10.0)
+    # sans pannes : travail + points de reprise intermédiaires
+    t = ar.simulate_checkpointing(10, 2, 0.1, 0.5, mtbf=1e12)
+    assert t == pytest.approx(10 + 4 * 0.1)
+    # l'intervalle de Young-Daly fait mieux que des intervalles extrêmes
+    def mean_t(iv):
+        return np.mean([ar.simulate_checkpointing(200, iv, 0.2, 0.2, 10, seed=s) for s in range(30)])
+    best = mean_t(ar.young_daly_interval(0.2, 10))
+    assert best < mean_t(0.2) and best < mean_t(20)
+
+
+# --- données et droit -----------------------------------------------------------------
+
+def test_chiffrement_et_crypto_shredding():
+    msg = "visite le 3 mars".encode("utf-8")
+    c = ar.xor_cipher(b"k" * 32, msg)
+    assert c != msg and ar.xor_cipher(b"k" * 32, c) == msg
+    log = ar.ShreddableLog(seed=0)
+    for i in range(6):
+        log.append("alice" if i % 2 else "bob", f"événement {i}")
+    size = log.size_bytes
+    assert len(log.read()) == 6
+    assert log.forget("alice") == 0
+    assert [u for u, _ in log.read()] == ["bob"] * 3
+    assert log.size_bytes == size            # rien n'a été réécrit
+
+
+def test_compaction():
+    entries = [("a", b"xx"), ("b", b"yyy"), ("a", b"z")]
+    kept, rewritten = ar.compact_without(entries, "a")
+    assert kept == [("b", b"yyy")] and rewritten == 3
