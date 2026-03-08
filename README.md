@@ -83,7 +83,7 @@ Lancer les tests : `pytest tests/`.
 | Chapitre | Thème | Statut |
 |---|---|---|
 | | *Partie I - Fondements des systèmes de données* | |
-| 1 | Compromis dans l'architecture des systèmes de données | 🚧 |
+| 1 | [Compromis dans l'architecture des systèmes de données](notebooks/ch01_compromis_architecture) | ✅ |
 | 2 | Définir les exigences non fonctionnelles | 🚧 |
 | 3 | Modèles de données et langages de requête | 🚧 |
 | 4 | Stockage et recherche | 🚧 |
