@@ -189,3 +189,79 @@ class Event:
     ts: float
     type: str
     data: dict = field(default_factory=dict)
+
+
+class EventLog:
+    """Journal d'événements en ajout seul ; les projections abonnées sont tenues à jour."""
+
+    def __init__(self):
+        self.events: list[Event] = []
+        self.subscribers = []
+
+    def append(self, type_: str, data: dict, ts: float) -> Event:
+        ev = Event(len(self.events), ts, type_, dict(data))
+        self.events.append(ev)
+        for s in self.subscribers:
+            s.apply(ev)
+        return ev
+
+    def subscribe(self, projection):
+        for ev in self.events:                     # rattrapage depuis le début du journal
+            projection.apply(ev)
+        self.subscribers.append(projection)
+        return projection
+
+
+class AvailableSeats:
+    """Vue : nombre de places encore disponibles."""
+
+    def __init__(self):
+        self.capacity = 0
+        self.booked = 0
+        self.bookings = {}
+
+    def apply(self, ev: Event):
+        d = ev.data
+        if ev.type in ("RegistrationOpened", "CapacityChanged"):
+            self.capacity = d["capacity"]
+        elif ev.type == "SeatsBooked":
+            self.bookings[d["booking"]] = d["seats"]
+            self.booked += d["seats"]
+        elif ev.type == "BookingCancelled":
+            self.booked -= self.bookings.pop(d["booking"])
+
+    @property
+    def available(self) -> int:
+        return self.capacity - self.booked
+
+
+class BookingStatus:
+    """Vue : état de chaque réservation."""
+
+    def __init__(self):
+        self.status = {}
+
+    def apply(self, ev: Event):
+        if ev.type == "SeatsBooked":
+            self.status[ev.data["booking"]] = {"client": ev.data["client"], "places": ev.data["seats"],
+                                               "etat": "confirmée"}
+        elif ev.type == "BookingCancelled":
+            self.status[ev.data["booking"]]["etat"] = "annulée"
+
+
+class DailyDashboard:
+    """Vue : réservations et annulations par jour (tableau de bord de l'organisateur)."""
+
+    def __init__(self):
+        self.rows = defaultdict(lambda: {"reservations": 0, "places": 0, "annulations": 0})
+
+    def apply(self, ev: Event):
+        day = int(ev.ts // 86400)
+        if ev.type == "SeatsBooked":
+            self.rows[day]["reservations"] += 1
+            self.rows[day]["places"] += ev.data["seats"]
+        elif ev.type == "BookingCancelled":
+            self.rows[day]["annulations"] += 1
+
+    def frame(self) -> pd.DataFrame:
+        return pd.DataFrame.from_dict(dict(self.rows), orient="index").sort_index()
