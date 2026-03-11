@@ -265,3 +265,95 @@ class DailyDashboard:
 
     def frame(self) -> pd.DataFrame:
         return pd.DataFrame.from_dict(dict(self.rows), orient="index").sort_index()
+
+
+class BadgeList:
+    """Vue : badges à imprimer (une ligne par place des réservations actives)."""
+
+    def __init__(self):
+        self.by_booking = {}
+
+    def apply(self, ev: Event):
+        if ev.type == "SeatsBooked":
+            self.by_booking[ev.data["booking"]] = [f"{ev.data['client']} #{k + 1}" for k in range(ev.data["seats"])]
+        elif ev.type == "BookingCancelled":
+            self.by_booking.pop(ev.data["booking"], None)
+
+    @property
+    def badges(self) -> list[str]:
+        return [b for lst in self.by_booking.values() for b in lst]
+
+
+class ConferenceService:
+    """Traitement des commandes : une commande est validée avant de devenir un événement.
+
+    Seules les commandes valides produisent un événement (nommé au passé) : le journal
+    ne contient donc que des faits, qu'aucune projection n'a le droit de refuser.
+    """
+
+    def __init__(self, log: EventLog | None = None):
+        self.log = log or EventLog()
+        self.state = self.log.subscribe(AvailableSeats())      # modèle d'écriture minimal
+        self.rejected = []
+
+    def handle(self, cmd: dict, ts: float) -> bool:
+        kind = cmd["cmd"]
+        st = self.state
+        if kind == "open":
+            self.log.append("RegistrationOpened", {"capacity": cmd["capacity"]}, ts)
+        elif kind == "book":
+            if cmd["booking"] in st.bookings or cmd["seats"] > st.available:
+                self.rejected.append((ts, cmd))
+                return False
+            self.log.append("SeatsBooked", {"booking": cmd["booking"], "client": cmd["client"],
+                                            "seats": cmd["seats"]}, ts)
+        elif kind == "cancel":
+            if cmd["booking"] not in st.bookings:
+                self.rejected.append((ts, cmd))
+                return False
+            self.log.append("BookingCancelled", {"booking": cmd["booking"]}, ts)
+        elif kind == "capacity":
+            if cmd["capacity"] < st.booked:
+                self.rejected.append((ts, cmd))
+                return False
+            self.log.append("CapacityChanged", {"capacity": cmd["capacity"]}, ts)
+        else:
+            raise ValueError(kind)
+        return True
+
+
+def replay(events, projection):
+    """Reconstruit une projection en rejouant les événements dans l'ordre donné."""
+    for ev in events:
+        projection.apply(ev)
+    return projection
+
+
+def make_conference_commands(n: int = 2000, capacity: int = 500, seed: int = 0, days: int = 60):
+    """Flux de commandes réaliste : ouverture, réservations (individuelles ou par lots),
+    annulations, et un changement de salle à mi-parcours. Renvoie [(ts, commande)]."""
+    rng = np.random.default_rng(seed)
+    cmds = [(0.0, {"cmd": "open", "capacity": capacity})]
+    ts = np.sort(rng.uniform(3600, days * 86400, n))
+    made = []
+    clients = ["Acme", "Globex", "Initech", "Umbrella", "Hooli", "Stark", "Wayne", "Cyberdyne"]
+    for i, t in enumerate(ts):
+        if i == n // 2:
+            cmds.append((float(t), {"cmd": "capacity", "capacity": int(capacity * 1.5)}))
+            continue
+        if made and rng.random() < 0.12:
+            b = made[int(rng.integers(len(made)))]
+            cmds.append((float(t), {"cmd": "cancel", "booking": b}))
+        else:
+            bulk = rng.random() < 0.1
+            seats = int(rng.integers(5, 30)) if bulk else 1
+            client = str(rng.choice(clients)) if bulk else f"participant {i}"
+            b = f"R{i:05d}"
+            made.append(b)
+            cmds.append((float(t), {"cmd": "book", "booking": b, "client": client, "seats": seats}))
+    return cmds
+
+
+# =====================================================================================
+# 4. DataFrames, matrices creuses
+# =====================================================================================
