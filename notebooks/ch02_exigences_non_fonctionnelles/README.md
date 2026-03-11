@@ -20,6 +20,7 @@ Les fonctions réutilisables (graphe social et coûts du fan-out, timelines à l
 | Notebook | Exercices |
 |---|---|
 | [`ch02_exercices_01-06.ipynb`](ch02_exercices_01-06.ipynb) | 2.1 à 2.6 |
+| [`ch02_exercices_07-12.ipynb`](ch02_exercices_07-12.ipynb) | 2.7 à 2.12 |
 
 - **Ex. 2.1** - Ordres de grandeur du fan-out, seuil lectures/écritures démontré, retard et rattrapage après un pic (simulation fluide).
 - **Ex. 2.2** - Seuil de l'approche hybride : indépendance vis-à-vis de F sous coût linéaire, seuil F* quand les comptes populaires publient plus, vérification sur graphe, contrainte de pire cas.
@@ -27,5 +28,11 @@ Les fonctions réutilisables (graphe social et coûts du fan-out, timelines à l
 - **Ex. 2.4** - Amplification de la latence de queue sur 40 appels, quantile par appel, requêtes de couverture (formule, simulation, surcoût).
 - **Ex. 2.5** - Échantillonnage par réservoir (preuve et implémentation) contre histogramme log-linéaire pour les hauts percentiles.
 - **Ex. 2.6** - Loi de Little et pool de connexions : Erlang C, simulation, effet d'un ralentissement de la base (cascade).
+- **Ex. 2.7** - Blocage en tête de file : file commune, serveurs dédiés ou priorité (simulateur à événements).
+- **Ex. 2.8** - Pannes de disques, MTTDL selon le nombre de copies et le temps de reconstruction, pannes corrélées de lot (calcul et simulation).
+- **Ex. 2.9** - Disponibilité d'une chaîne de services, redondance, budget d'indisponibilité, mises à jour progressives, simulation d'états.
+- **Ex. 2.10** - Ajuster l'USL sur un test de charge, plafond du cluster, comparaison avec une machine unique, changer d'architecture.
+- **Ex. 2.11** - Tempête de relances : amplification 4^3 sur trois couches, budget de relances et frontière de la panne métastable (mini-lab).
+- **Ex. 2.12** - Erreurs silencieuses à l'échelle d'un parc : cœurs défectueux dans un traitement distribué, corruption de stockage et vérification périodique.
 
 Pas de lab Docker pour ce chapitre : les notions sont mieux servies par des simulations déterministes.
