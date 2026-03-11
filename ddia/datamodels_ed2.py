@@ -357,3 +357,61 @@ def make_conference_commands(n: int = 2000, capacity: int = 500, seed: int = 0, 
 # =====================================================================================
 # 4. DataFrames, matrices creuses
 # =====================================================================================
+
+def make_ratings(n_users: int = 2000, n_movies: int = 500, per_user: float = 25, seed: int = 0) -> pd.DataFrame:
+    """Table relationnelle de notes (1 à 5) : user_id, movie_id, rating, date.
+
+    Popularité des films en loi de Zipf ; deux « goûts » latents rendent les notes
+    corrélées (utile pour la recommandation).
+    """
+    rng = np.random.default_rng(seed)
+    pop = 1.0 / np.arange(1, n_movies + 1) ** 0.9
+    pop /= pop.sum()
+    taste_u = rng.normal(size=(n_users, 2))
+    taste_m = rng.normal(size=(n_movies, 2))
+    rows = []
+    for u in range(n_users):
+        k = max(1, int(rng.poisson(per_user)))
+        movies = rng.choice(n_movies, size=min(k, n_movies), replace=False, p=pop)
+        for m in movies:
+            score = 3 + 0.9 * taste_u[u] @ taste_m[m] + rng.normal(scale=0.6)
+            rows.append((u, int(m), int(np.clip(np.rint(score), 1, 5)), int(rng.integers(0, 3 * 365))))
+    df = pd.DataFrame(rows, columns=["user_id", "movie_id", "rating", "jour"])
+    return df
+
+
+def to_csr(rows, cols, vals, shape):
+    """Matrice creuse au format CSR (Compressed Sparse Row) à partir de triplets (i, j, v).
+
+    Renvoie (indptr, indices, data) : les valeurs non nulles de la ligne i sont
+    data[indptr[i]:indptr[i + 1]], en colonnes indices[indptr[i]:indptr[i + 1]].
+    """
+    rows, cols, vals = np.asarray(rows), np.asarray(cols), np.asarray(vals, dtype=np.float32)
+    order = np.lexsort((cols, rows))
+    rows, cols, vals = rows[order], cols[order], vals[order]
+    indptr = np.zeros(shape[0] + 1, dtype=np.int64)
+    np.add.at(indptr, rows + 1, 1)
+    return np.cumsum(indptr), cols.astype(np.int32), vals
+
+
+def csr_matvec(csr, x):
+    """Produit matrice creuse x vecteur dense."""
+    indptr, indices, data = csr
+    out = np.zeros(len(indptr) - 1)
+    prod = data * x[indices]
+    nz = np.diff(indptr) > 0
+    out[nz] = np.add.reduceat(prod, indptr[:-1][nz])
+    return out
+
+
+def csr_nbytes(csr) -> int:
+    return sum(a.nbytes for a in csr)
+
+
+def cosine_top_k(matrix: np.ndarray, j: int, k: int = 5) -> list[tuple[int, float]]:
+    """Les k colonnes les plus similaires (cosinus) à la colonne j d'une matrice dense."""
+    norms = np.linalg.norm(matrix, axis=0)
+    sims = matrix.T @ matrix[:, j] / np.where(norms * norms[j] == 0, 1, norms * norms[j])
+    sims[j] = -np.inf
+    best = np.argsort(-sims)[:k]
+    return [(int(b), float(sims[b])) for b in best]
