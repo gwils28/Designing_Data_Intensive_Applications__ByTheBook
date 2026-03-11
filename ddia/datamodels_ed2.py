@@ -116,3 +116,76 @@ def parse_graphql(text: str) -> list[dict]:
         return out
 
     return selection()
+
+
+def query_depth(fields: list[dict] | None) -> int:
+    """Profondeur d'imbrication d'une requête (pour refuser les requêtes trop coûteuses)."""
+    if not fields:
+        return 0
+    return 1 + max(query_depth(f["fields"]) for f in fields)
+
+
+def execute_graphql(query: str, schema: dict, ctx: dict, batched: bool = False,
+                    max_depth: int | None = None) -> dict:
+    """Exécute une requête sur un schéma de résolveurs.
+
+    schema[type][champ] = (type_renvoyé ou None pour un scalaire, résolveur, liste?)
+    Un résolveur reçoit une **liste de parents** et renvoie une liste de valeurs (une par
+    parent). En mode naïf, il est appelé une fois par parent (problème N+1) ; en mode
+    regroupé (`batched=True`, à la DataLoader), une seule fois par champ et par niveau.
+    ctx["calls"] compte les appels aux résolveurs non triviaux.
+    """
+    fields = parse_graphql(query)
+    if max_depth is not None and query_depth(fields) > max_depth:
+        raise ValueError(f"requête refusée : profondeur {query_depth(fields)} > {max_depth}")
+    ctx.setdefault("calls", 0)
+
+    def resolve(typ, parents, sel):
+        outs = [dict() for _ in parents]
+        for f in sel:
+            rtype, fn, is_list = schema[typ][f["name"]]
+            if batched:
+                vals = fn(parents, f["args"], ctx)
+            else:
+                vals = [fn([p], f["args"], ctx)[0] for p in parents]
+            if rtype is None:
+                for o, v in zip(outs, vals):
+                    o[f["name"]] = v
+                continue
+            # aplatir les enfants pour résoudre le niveau suivant d'un seul coup
+            flat, shape = [], []
+            for v in vals:
+                if v is None:
+                    shape.append(None)
+                elif is_list:
+                    shape.append(len(v))
+                    flat.extend(v)
+                else:
+                    shape.append(-1)
+                    flat.append(v)
+            child = resolve(rtype, flat, f["fields"]) if flat else []
+            k = 0
+            for o, s in zip(outs, shape):
+                if s is None:
+                    o[f["name"]] = None
+                elif s == -1:
+                    o[f["name"]] = child[k]
+                    k += 1
+                else:
+                    o[f["name"]] = child[k:k + s]
+                    k += s
+        return outs
+
+    return {"data": resolve("Query", [None], fields)[0]}
+
+
+# =====================================================================================
+# 3. Event sourcing et CQRS
+# =====================================================================================
+
+@dataclass(frozen=True)
+class Event:
+    seq: int
+    ts: float
+    type: str
+    data: dict = field(default_factory=dict)
