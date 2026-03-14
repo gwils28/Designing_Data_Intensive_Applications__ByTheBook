@@ -15,6 +15,18 @@ Les fonctions réutilisables (CV synthétiques et leur chargement en tables ou e
 | [`ch03_cours_4_graphes_et_cypher.ipynb`](ch03_cours_4_graphes_et_cypher.ipynb) | *Graph-Like Data Models* : *Property Graphs*, *The Cypher Query Language*, *Graph Queries in SQL* | liste contre matrice d'adjacence, PageRank par itération de puissance ; graphe de propriétés fil rouge (diagramme), deux tables SQL, extension par les allergies ; requête « émigrés » en Cypher et ses deux stratégies d'exécution mesurées sur un graphe de 50 000 personnes ; `WITH RECURSIVE` sur SQLite, cycles (`UNION` contre `UNION ALL`), effet de la profondeur |
 | [`ch03_cours_5_triplets_et_datalog.ipynb`](ch03_cours_5_triplets_et_datalog.ipynb) | *Triple Stores and SPARQL* (encadré *The Semantic Web*, *The RDF data model*, *The SPARQL query language*) ; *Datalog: Recursive Relational Queries* ; *GraphQL* | triplets, Turtle, index SPO/POS/OSP ; espaces de noms RDF et fusion de jeux de données ; motifs et chemins de propriétés SPARQL, ordre des jointures mesuré ; faits et règles Datalog, dérivation pas à pas (diagramme) ; évaluation naïve contre semi-naïve ($n^3$ contre $n^2$) ; GraphQL : réponse en forme de requête, résolveurs naïfs (N+1) ou regroupés, duplication, limite de profondeur |
 
+## Notebooks d'exercices
+
+| Notebook | Exercices |
+|---|---|
+| [`ch03_exercices_01-05.ipynb`](ch03_exercices_01-05.ipynb) | 3.1 à 3.5 |
+
+- **Ex. 3.1** - Choisir un modèle pour cinq applications (catalogue, facturation, blog, fraude, liste réordonnable) ; cercle de fraude retrouvé comme composante connexe d'un graphe.
+- **Ex. 3.2** - Jointure multiple ou requêtes séparées : seuil $pec - (1+p+e+c) > 3\,\text{RTT}/t$, carte du gagnant, mesure sur SQLite, variante par union.
+- **Ex. 3.3** - Coût d'un renommage dénormalisé sous loi de Zipf (tirage uniforme ou proportionnel) et probabilité d'incohérence sans transaction (calcul et simulation).
+- **Ex. 3.4** - Relation plusieurs-à-plusieurs stockée des deux côtés : divergence en $Np$, tâche de réconciliation, comparaison avec la représentation normalisée.
+- **Ex. 3.5** - Migration immédiate, paresseuse ou combinée : durée, décroissance géométrique, récurrence affine résolue et simulée.
+
 ## Lab (Docker)
 
 | Notebook | Contenu |
