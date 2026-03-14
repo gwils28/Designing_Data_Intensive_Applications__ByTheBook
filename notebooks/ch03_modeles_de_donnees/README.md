@@ -37,6 +37,7 @@ Les fonctions réutilisables (CV synthétiques et leur chargement en tables ou e
 
 | Notebook | Contenu |
 |---|---|
+| [`ch03_lab_postgres_jsonb_et_recursif.ipynb`](ch03_lab_postgres_jsonb_et_recursif.ipynb) | PostgreSQL 16 : 50 000 CV en tables et en JSONB (tailles) ; quatre façons de lire un profil, dont un agrégat JSON côté serveur ; index GIN sur des valeurs imbriquées (`@>`) contre B-tree ; octets de WAL d'une petite modification selon la taille du document ; migrations (`ADD COLUMN` à défaut constant ou volatil, `UPDATE`) ; graphe en deux tables, `WITH RECURSIVE` et clause `CYCLE` |
 
 Démarrage et arrêt (depuis la racine du dépôt), port hôte 10332 :
 
