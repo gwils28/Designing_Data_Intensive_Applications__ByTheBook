@@ -20,12 +20,18 @@ Les fonctions réutilisables (CV synthétiques et leur chargement en tables ou e
 | Notebook | Exercices |
 |---|---|
 | [`ch03_exercices_01-05.ipynb`](ch03_exercices_01-05.ipynb) | 3.1 à 3.5 |
+| [`ch03_exercices_06-10.ipynb`](ch03_exercices_06-10.ipynb) | 3.6 à 3.10 |
 
 - **Ex. 3.1** - Choisir un modèle pour cinq applications (catalogue, facturation, blog, fraude, liste réordonnable) ; cercle de fraude retrouvé comme composante connexe d'un graphe.
 - **Ex. 3.2** - Jointure multiple ou requêtes séparées : seuil $pec - (1+p+e+c) > 3\,\text{RTT}/t$, carte du gagnant, mesure sur SQLite, variante par union.
 - **Ex. 3.3** - Coût d'un renommage dénormalisé sous loi de Zipf (tirage uniforme ou proportionnel) et probabilité d'incohérence sans transaction (calcul et simulation).
 - **Ex. 3.4** - Relation plusieurs-à-plusieurs stockée des deux côtés : divergence en $Np$, tâche de réconciliation, comparaison avec la représentation normalisée.
 - **Ex. 3.5** - Migration immédiate, paresseuse ou combinée : durée, décroissance géométrique, récurrence affine résolue et simulée.
+- **Ex. 3.6** - Deux rapports en pipeline d'agrégation (`$project`, `$group`, `$lookup`) et en SQL, résultats comparés.
+- **Ex. 3.7** - Généalogie en `WITH RECURSIVE` : ancêtres par génération, ancêtre commun le plus proche, cycle dû à une erreur de saisie et sa détection.
+- **Ex. 3.8** - « Vivre sur son continent de naissance » en Cypher, SPARQL, Datalog et SQL, exécuté et comparé.
+- **Ex. 3.9** - Récursion linéaire ou non linéaire en Datalog : $n$ tours contre $\log_2 n$, dérivations mesurées.
+- **Ex. 3.10** - Estimer la sélectivité de motifs de triplets pour choisir l'ordre des jointures, estimations contre mesures.
 
 ## Lab (Docker)
 
