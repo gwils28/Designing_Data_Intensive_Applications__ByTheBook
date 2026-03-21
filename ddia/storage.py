@@ -1082,6 +1082,11 @@ def tokenize(text: str) -> List[str]:
     return [w.lower() for w in _WORD.findall(text)]
 
 
+def ngrams(word: str, n: int = 3) -> List[str]:
+    """n-grammes de caractères d'un mot (sans remplissage)."""
+    return [word[i:i + n] for i in range(len(word) - n + 1)]
+
+
 class InvertedIndex:
     """Index inversé : terme -> liste triée des identifiants de documents (postings)."""
 
@@ -1356,6 +1361,57 @@ def data_cube(df, dims: Sequence[str], measure: str, agg: str = "sum") -> Dict[T
 # =====================================================================================
 # 13. Exécution de requêtes : interprétation et compilation
 # =====================================================================================
+
+def interpret_query(columns: Dict[str, Sequence], where: Sequence[Tuple[str, str, object]], sum_col: str):
+    """Exécute `SELECT SUM(sum_col) WHERE c1 op v1 AND ...` comme un interpréteur : pour
+    chaque ligne, on parcourt la structure de la requête pour savoir quoi comparer."""
+    import operator
+
+    fns = {"=": operator.eq, "==": operator.eq, "<": operator.lt, "<=": operator.le, ">": operator.gt,
+           ">=": operator.ge, "!=": operator.ne, "in": lambda a, b: a in b}
+    plan = [(columns[c], fns[op], v) for c, op, v in where]
+    target = columns[sum_col]
+    total = 0
+    for i in range(len(target)):
+        ok = True
+        for col, fn, v in plan:
+            if not fn(col[i], v):
+                ok = False
+                break
+        if ok:
+            total += target[i]
+    return total
+
+
+def compile_query(where: Sequence[Tuple[str, str, object]], sum_col: str):
+    """Génère le code source d'une fonction spécialisée pour la requête, puis le compile
+    (ici en bytecode Python avec `compile`, là où un vrai moteur produit du code machine,
+    par exemple avec LLVM). Renvoie (fonction, code source)."""
+    ops = {"=": "==", "==": "==", "<": "<", "<=": "<=", ">": ">", ">=": ">=", "!=": "!=", "in": "in"}
+    conds = []
+    for c, op, v in where:
+        conds.append(f"{c}[i] {ops[op]} {v!r}")
+    cols = sorted({c for c, _, _ in where} | {sum_col})
+    src = (f"def query({', '.join(cols)}):\n"
+           f"    total = 0\n"
+           f"    for i in range(len({sum_col})):\n"
+           f"        if {' and '.join(conds) or 'True'}:\n"
+           f"            total += {sum_col}[i]\n"
+           f"    return total\n")
+    ns: dict = {}
+    exec(compile(src, "<requête compilée>", "exec"), ns)
+    fn = ns["query"]
+
+    def run(columns):
+        return fn(**{c: columns[c] for c in cols})
+
+    return run, src
+
+
+# =====================================================================================
+# 14. Petit utilitaire graphique
+# =====================================================================================
+
 
 def plain_log_ticks(ax, axis: str = "y") -> None:
     """Graduations lisibles (1, 10, 100, 0,01...) sur un axe logarithmique, sans passer
