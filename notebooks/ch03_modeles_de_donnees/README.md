@@ -22,6 +22,7 @@ Les fonctions réutilisables (CV synthétiques et leur chargement en tables ou e
 |---|---|
 | [`ch03_exercices_01-05.ipynb`](ch03_exercices_01-05.ipynb) | 3.1 à 3.5 |
 | [`ch03_exercices_06-10.ipynb`](ch03_exercices_06-10.ipynb) | 3.6 à 3.10 |
+| [`ch03_exercices_11-12.ipynb`](ch03_exercices_11-12.ipynb) | 3.11 et 3.12 |
 
 - **Ex. 3.1** - Choisir un modèle pour cinq applications (catalogue, facturation, blog, fraude, liste réordonnable) ; cercle de fraude retrouvé comme composante connexe d'un graphe.
 - **Ex. 3.2** - Jointure multiple ou requêtes séparées : seuil $pec - (1+p+e+c) > 3\,\text{RTT}/t$, carte du gagnant, mesure sur SQLite, variante par union.
@@ -33,6 +34,8 @@ Les fonctions réutilisables (CV synthétiques et leur chargement en tables ou e
 - **Ex. 3.8** - « Vivre sur son continent de naissance » en Cypher, SPARQL, Datalog et SQL, exécuté et comparé.
 - **Ex. 3.9** - Récursion linéaire ou non linéaire en Datalog : $n$ tours contre $\log_2 n$, dérivations mesurées.
 - **Ex. 3.10** - Estimer la sélectivité de motifs de triplets pour choisir l'ordre des jointures, estimations contre mesures.
+- **Ex. 3.11** - Event sourcing : fréquence optimale des instantanés $k^* = \sqrt{2ES/(rc)}$, reconstruction depuis un instantané, partitionnement tourniquet contre par clé.
+- **Ex. 3.12** - Dimensionner matrices creuses (dense, COO, CSR), one-hot et OBT ; mesures de taille et de temps sur une instance réduite.
 
 ## Lab (Docker)
 
