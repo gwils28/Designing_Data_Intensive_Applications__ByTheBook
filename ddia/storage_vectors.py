@@ -108,3 +108,139 @@ class IVFIndex:
         self.distance_computations += cand.size
         order = np.argsort(-sims)[:k]
         return [int(i) for i in cand[order]]
+
+
+class HNSWIndex:
+    """Graphe HNSW simplifié (Malkov et Yashunin) : chaque vecteur reçoit un niveau
+    aléatoire (loi géométrique), les couches hautes sont clairsemées et servent
+    d'« autoroutes », la couche 0 contient tout le monde."""
+
+    def __init__(self, X: np.ndarray, M: int = 12, ef_construction: int = 64, seed: int = 0,
+                 metric: str = "cosine"):
+        if metric not in ("cosine", "l2"):
+            raise ValueError("metric doit valoir 'cosine' ou 'l2'")
+        self.metric = metric
+        self.X = normalize(X) if metric == "cosine" else np.asarray(X, dtype=np.float32)
+        self.M = M
+        self.M0 = 2 * M
+        self.ef_construction = ef_construction
+        self.mL = 1 / math.log(M)
+        self.rng = np.random.default_rng(seed)
+        self.layers: List[Dict[int, List[int]]] = []
+        self.level_of: Dict[int, int] = {}
+        self.entry: Optional[int] = None
+        self.distance_computations = 0
+        for i in range(len(self.X)):
+            self._insert(i)
+        self.build_distance_computations = self.distance_computations
+        self.distance_computations = 0
+
+    def _raw(self, q: np.ndarray, ids) -> np.ndarray:
+        """Distances (1 - cosinus, ou carré de la distance euclidienne), sans comptage."""
+        if self.metric == "cosine":
+            return 1.0 - self.X[ids] @ q
+        diff = self.X[ids] - q
+        return np.einsum("ij,ij->i", diff, diff)
+
+    def _dist(self, q: np.ndarray, ids) -> np.ndarray:
+        ids = np.asarray(ids, dtype=np.int64)
+        self.distance_computations += ids.size
+        return self._raw(q, ids)
+
+    def _search_layer(self, q, entries: List[int], ef: int, layer: int, trace: Optional[list] = None):
+        visited = set(entries)
+        d0 = self._dist(q, entries)
+        cand = [(float(d), e) for d, e in zip(d0, entries)]
+        heapq.heapify(cand)
+        best = [(-float(d), e) for d, e in zip(d0, entries)]
+        heapq.heapify(best)
+        while len(best) > ef:
+            heapq.heappop(best)
+        graph = self.layers[layer]
+        while cand:
+            d, c = heapq.heappop(cand)
+            if d > -best[0][0] and len(best) >= ef:
+                break
+            if trace is not None:
+                trace.append((layer, c))
+            nbrs = [n for n in graph.get(c, []) if n not in visited]
+            if not nbrs:
+                continue
+            visited.update(nbrs)
+            for dn, n in zip(self._dist(q, nbrs), nbrs):
+                dn = float(dn)
+                if len(best) < ef or dn < -best[0][0]:
+                    heapq.heappush(cand, (dn, n))
+                    heapq.heappush(best, (-dn, n))
+                    if len(best) > ef:
+                        heapq.heappop(best)
+        return sorted((-d, e) for d, e in best)
+
+    def _insert(self, i: int) -> None:
+        q = self.X[i]
+        level = int(-math.log(1 - self.rng.random()) * self.mL)
+        self.level_of[i] = level
+        while len(self.layers) <= level:
+            self.layers.append({})
+        if self.entry is None:
+            for l in range(level + 1):
+                self.layers[l][i] = []
+            self.entry = i
+            return
+        ep = [self.entry]
+        top = self.level_of[self.entry]
+        for l in range(top, level, -1):
+            ep = [self._search_layer(q, ep, 1, l)[0][1]]
+        for l in range(min(level, top), -1, -1):
+            res = self._search_layer(q, ep, self.ef_construction, l)
+            mmax = self.M0 if l == 0 else self.M
+            nbrs = self._select(i, [e for _, e in res], self.M)
+            self.layers[l][i] = list(nbrs)
+            for n in nbrs:
+                lst = self.layers[l].setdefault(n, [])
+                lst.append(i)
+                if len(lst) > mmax:  # élagage, avec la même heuristique de diversité
+                    self.layers[l][n] = self._select(n, lst, mmax)
+            ep = [e for _, e in res]
+        for l in range(top + 1, level + 1):
+            self.layers[l][i] = []
+        if level > top:
+            self.entry = i
+
+    def _select(self, base: int, cands: List[int], m: int) -> List[int]:
+        """Heuristique de sélection des voisins de HNSW : on parcourt les candidats du plus
+        proche au plus lointain et on garde un candidat seulement s'il est plus proche de
+        `base` que de tous les voisins déjà gardés. Cela conserve des liens « longs » vers
+        d'autres régions (sinon les groupes de points se referment sur eux-mêmes). Les
+        places restantes sont complétées par les plus proches écartés."""
+        cands = [c for c in dict.fromkeys(cands) if c != base]
+        d = self._raw(self.X[base], cands)
+        order = [cands[j] for j in np.argsort(d)]
+        dist = {c: float(dd) for c, dd in zip(cands, d)}
+        kept: List[int] = []
+        dropped: List[int] = []
+        for c in order:
+            if len(kept) >= m:
+                break
+            if kept:
+                dk = self._raw(self.X[c], kept)
+                if float(dk.min()) < dist[c]:
+                    dropped.append(c)
+                    continue
+            kept.append(c)
+        for c in dropped:
+            if len(kept) >= m:
+                break
+            kept.append(c)
+        return kept
+
+    def search(self, q: np.ndarray, k: int = 10, ef: int = 32, trace: Optional[list] = None) -> List[int]:
+        q = np.asarray(q, dtype=np.float32)
+        ep = [self.entry]
+        for l in range(self.level_of[self.entry], 0, -1):
+            ep = [self._search_layer(q, ep, 1, l, trace)[0][1]]
+        res = self._search_layer(q, ep, max(ef, k), 0, trace)
+        return [e for _, e in res[:k]]
+
+    def layer_sizes(self) -> List[int]:
+        return [len(g) for g in self.layers]
