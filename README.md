@@ -86,7 +86,7 @@ Lancer les tests : `pytest tests/`.
 | 1 | [Compromis dans l'architecture des systèmes de données](notebooks/ch01_compromis_architecture) | ✅ |
 | 2 | [Définir les exigences non fonctionnelles](notebooks/ch02_exigences_non_fonctionnelles) | ✅ |
 | 3 | [Modèles de données et langages de requête](notebooks/ch03_modeles_de_donnees) | ✅ |
-| 4 | Stockage et recherche | 🚧 |
+| 4 | [Stockage et recherche](notebooks/ch04_stockage_et_recherche) | 🚧 |
 | 5 | Encodage et évolution | 🚧 |
 | | *Partie II - Données distribuées* | |
 | 6 | Réplication | 🚧 |
