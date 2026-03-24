@@ -9,6 +9,7 @@ Les fonctions réutilisables (journal append-only, index de hachage sur segments
 | Notebook | Sections du livre | Contenu |
 |---|---|---|
 | [`ch04_cours_1_journaux_et_hachage.ipynb`](ch04_cours_1_journaux_et_hachage.ipynb) | *Storage and Indexing for OLTP* ; *Log-Structured Storage* (index de hachage) | la base « bash » en Python, lecture en O(n) mesurée ; index dérivés et coût en écriture (mesuré de 0 à 6 index, diagramme) ; index de hachage en mémoire (diagramme, lecture en O(1)) ; segments, fusion et compaction (dents de scie de l'espace disque) ; format binaire avec somme de contrôle, tombstones, reprise après panne et écriture partielle tronquée ; un écrivain, des lecteurs, un compacteur (diagramme espace-temps) ; écritures séquentielles contre aléatoires (modèle HDD / SSD) ; RAM de l'index et limites |
+| [`ch04_cours_2_sstables_et_lsm.ipynb`](ch04_cours_2_sstables_et_lsm.ipynb) | *The SSTable file format* ; *Constructing and merging SSTables* ; *Bloom filters* ; *Compaction strategies* ; *Embedded Storage Engines* | anatomie d'une SSTable (diagramme), index épars et taille de bloc, compression par bloc ; architecture LSM (diagramme : WAL, memtable, niveaux) ; reprise depuis le WAL, enregistrement tronqué ; fusion k-voies et tombstones, coût O(N log k) mesuré ; filtres de Bloom : visualisation, démonstration du k optimal et de la règle des 10 bits pour 1 %, mesures, effet sur les lectures ; size-tiered contre leveled : amplifications mesurées, forme des arbres ; moteurs embarqués et SSTables sur stockage objet (diagramme) |
 
 ## Labs (Docker)
 
