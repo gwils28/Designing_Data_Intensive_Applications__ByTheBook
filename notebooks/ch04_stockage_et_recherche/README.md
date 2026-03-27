@@ -14,6 +14,19 @@ Les fonctions réutilisables (journal append-only, index de hachage sur segments
 | [`ch04_cours_4_index_secondaires_et_plein_texte.ipynb`](ch04_cours_4_index_secondaires_et_plein_texte.ipynb) | *Multicolumn and Secondary Indexes* ; *Storing Values Within the Index* ; *Keeping Everything in Memory* ; *Multidimensional and Full-Text Indexes* (*Full-Text Search*) | index secondaire sur B+ (clé + identifiant) ; tas, index groupé, index couvrant (diagramme), modèle de coût et seuil de sélectivité, plans SQLite ; index concaténé, courbe de Morton et requête rectangulaire sur 100 000 restaurants ; index inversé (loi de Zipf des postings lists, intersection, bitmaps), index de trigrammes ; table de Levenshtein et recherche floue dans un trie ; coût de l'encodage et bases en mémoire |
 | [`ch04_cours_5_stockage_en_colonnes.ipynb`](ch04_cours_5_stockage_en_colonnes.ipynb) | *Data Storage for Analytics* (*Cloud Data Warehouses*) ; *Column-Oriented Storage* (*Column compression*, *Sort order in column storage*, *Writing to column-oriented storage*) ; *Query Execution: Compilation and Vectorization* ; *Materialized Views and Data Cubes* | rappels OLTP / OLAP et HTAP ; lignes contre colonnes (diagramme, octets et temps mesurés) ; dictionnaire, bitmaps et RLE (figure, tailles mesurées), filtres par OU / ET de bitmaps ; traitement vectorisé ; ordre de tri et compression ; écritures par lots (modèle LSM) ; cube de données, treillis des agrégats, gain et rigidité ; interprétation, compilation (code généré) et vectorisation mesurées ; entrepôt décomposé sur lac de données (diagramme), calcul élastique |
 
+## Notebooks d'exercices
+
+| Notebook | Exercices |
+|---|---|
+| [`ch04_exercices_01-06.ipynb`](ch04_exercices_01-06.ipynb) | 4.1 à 4.6 |
+
+- **Ex. 4.1** - Dimensionner un index de hachage à la Bitcask : RAM, croissance du journal, fréquence de compaction, reprise et fichier d'indices.
+- **Ex. 4.2** - Compaction : démonstration de WA = α / (α - 1), compromis espace / réécritures, simulation.
+- **Ex. 4.3** - Filtres de Bloom d'un LSM : bits par clé, lectures inutiles, répartition optimale de la mémoire entre niveaux (lagrangien).
+- **Ex. 4.4** - Choisir une stratégie de compaction selon la charge (size-tiered, leveled T = 4 et T = 10, mesurés).
+- **Ex. 4.5** - Hauteur d'un B-tree d'un milliard de lignes, mémoire des pages internes, E/S par lecture.
+- **Ex. 4.6** - Trouver l'anomalie : panne au milieu d'un éclatement, les six ordres d'écriture testés exhaustivement.
+
 ## Labs (Docker)
 
 | Notebook | Contenu |
