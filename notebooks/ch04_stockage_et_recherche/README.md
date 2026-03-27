@@ -19,6 +19,7 @@ Les fonctions réutilisables (journal append-only, index de hachage sur segments
 | Notebook | Exercices |
 |---|---|
 | [`ch04_exercices_01-06.ipynb`](ch04_exercices_01-06.ipynb) | 4.1 à 4.6 |
+| [`ch04_exercices_07-12.ipynb`](ch04_exercices_07-12.ipynb) | 4.7 à 4.12 |
 
 - **Ex. 4.1** - Dimensionner un index de hachage à la Bitcask : RAM, croissance du journal, fréquence de compaction, reprise et fichier d'indices.
 - **Ex. 4.2** - Compaction : démonstration de WA = α / (α - 1), compromis espace / réécritures, simulation.
@@ -26,6 +27,12 @@ Les fonctions réutilisables (journal append-only, index de hachage sur segments
 - **Ex. 4.4** - Choisir une stratégie de compaction selon la charge (size-tiered, leveled T = 4 et T = 10, mesurés).
 - **Ex. 4.5** - Hauteur d'un B-tree d'un milliard de lignes, mémoire des pages internes, E/S par lecture.
 - **Ex. 4.6** - Trouver l'anomalie : panne au milieu d'un éclatement, les six ordres d'écriture testés exhaustivement.
+- **Ex. 4.7** - LSM ou B-tree ? Bande passante, usure du SSD et IOPS pour une charge de télémétrie.
+- **Ex. 4.8** - Choisir ses index secondaires et couvrants avec SQLite : plans, temps de requête et coût d'insertion.
+- **Ex. 4.9** - Intersection de postings lists (fusion contre dichotomie) et recherche floue (variantes générées contre trie).
+- **Ex. 4.10** - Stockage en colonnes : octets lus, dictionnaire, RLE, taille d'un cube et remplissage du treillis.
+- **Ex. 4.11** - Interprétation, compilation et vectorisation : modèle de coût par ligne et par prédicat, régression.
+- **Ex. 4.12** - Dimensionner un index IVF : mémoire, nlist optimal = racine de (nprobe n), rappel mesuré.
 
 ## Labs (Docker)
 
