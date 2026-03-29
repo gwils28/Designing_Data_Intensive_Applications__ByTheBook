@@ -1294,3 +1294,67 @@ def simulate_retries(n: int = 10000, p_req_loss: float = 0.02, p_resp_loss: floa
 # =====================================================================================
 # JSON Schema (sous-ensemble minimal)
 # =====================================================================================
+
+def json_schema_validate(instance: Any, schema: Any, path: str = "$") -> List[str]:
+    """Valide `instance` contre un sous-ensemble de JSON Schema ; renvoie les erreurs.
+
+    Mots-clés pris en charge : type, enum, minimum, maximum, minLength, maxLength,
+    properties, required, additionalProperties (booléen ou schéma, vrai par défaut :
+    modèle de contenu **ouvert**), patternProperties, items.
+    """
+    _JS_TYPES = {
+        "string": lambda v: isinstance(v, str),
+        "integer": lambda v: isinstance(v, int) and not isinstance(v, bool),
+        "number": lambda v: isinstance(v, (int, float)) and not isinstance(v, bool),
+        "boolean": lambda v: isinstance(v, bool),
+        "null": lambda v: v is None,
+        "object": lambda v: isinstance(v, dict),
+        "array": lambda v: isinstance(v, list),
+    }
+    errs: List[str] = []
+    if schema is True or schema == {}:
+        return errs
+    if schema is False:
+        return [f"{path} : aucune valeur n'est permise ici"]
+    t = schema.get("type")
+    if t is not None:
+        types = t if isinstance(t, list) else [t]
+        if not any(_JS_TYPES[x](instance) for x in types):
+            return [f"{path} : type {type(instance).__name__} au lieu de {t}"]
+    if "enum" in schema and instance not in schema["enum"]:
+        errs.append(f"{path} : {instance!r} hors de {schema['enum']}")
+    if _JS_TYPES["number"](instance):
+        if "minimum" in schema and instance < schema["minimum"]:
+            errs.append(f"{path} : {instance} < minimum {schema['minimum']}")
+        if "maximum" in schema and instance > schema["maximum"]:
+            errs.append(f"{path} : {instance} > maximum {schema['maximum']}")
+    if isinstance(instance, str):
+        if "minLength" in schema and len(instance) < schema["minLength"]:
+            errs.append(f"{path} : chaîne trop courte")
+        if "maxLength" in schema and len(instance) > schema["maxLength"]:
+            errs.append(f"{path} : chaîne trop longue")
+    if isinstance(instance, dict):
+        props = schema.get("properties", {})
+        pats = schema.get("patternProperties", {})
+        addl = schema.get("additionalProperties", True)
+        for req in schema.get("required", []):
+            if req not in instance:
+                errs.append(f"{path} : propriété obligatoire {req!r} absente")
+        for k, v in instance.items():
+            matched = False
+            if k in props:
+                matched = True
+                errs += json_schema_validate(v, props[k], f"{path}.{k}")
+            for pat, sub in pats.items():
+                if re.search(pat, k):
+                    matched = True
+                    errs += json_schema_validate(v, sub, f"{path}.{k}")
+            if not matched:
+                if addl is False:
+                    errs.append(f"{path} : propriété {k!r} non prévue (modèle fermé)")
+                elif isinstance(addl, dict):
+                    errs += json_schema_validate(v, addl, f"{path}.{k}")
+    if isinstance(instance, list) and "items" in schema:
+        for k, v in enumerate(instance):
+            errs += json_schema_validate(v, schema["items"], f"{path}[{k}]")
+    return errs
