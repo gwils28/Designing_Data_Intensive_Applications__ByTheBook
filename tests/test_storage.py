@@ -219,6 +219,11 @@ def test_levenshtein_et_trie():
     assert visited < trie.n_nodes / 3
 
 
+def test_ngrammes():
+    assert S.ngrams("hello") == ["hel", "ell", "llo"]
+    assert S.ngrams("ab") == []
+
+
 def test_documents_synthetiques():
     vocab = S.make_vocabulary(500, seed=1)
     docs = S.make_documents(50, vocab, words_per_doc=20)
@@ -256,3 +261,15 @@ def test_make_sales_et_cube():
     assert len(cube) == 8
     assert cube[()] == pytest.approx(fact["net_price"].sum())
     assert cube[("store_sk",)].sum() == pytest.approx(fact["net_price"].sum())
+
+
+def test_interpretation_et_compilation():
+    rng = np.random.default_rng(0)
+    cols = {"product_sk": rng.integers(0, 10, 2000).tolist(), "store_sk": rng.integers(0, 5, 2000).tolist(),
+            "quantity": rng.integers(1, 5, 2000).tolist()}
+    where = [("product_sk", "=", 3), ("store_sk", "in", (1, 2))]
+    expected = sum(q for p, s, q in zip(cols["product_sk"], cols["store_sk"], cols["quantity"])
+                   if p == 3 and s in (1, 2))
+    assert S.interpret_query(cols, where, "quantity") == expected
+    fn, src = S.compile_query(where, "quantity")
+    assert fn(cols) == expected and "product_sk[i] == 3" in src
