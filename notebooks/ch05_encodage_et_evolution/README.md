@@ -9,6 +9,7 @@ Les fonctions réutilisables (varints et zigzag, JSON et MessagePack, Protocol B
 | Notebook | Sections du livre | Contenu |
 |---|---|---|
 | [`ch05_cours_1_formats_textuels_et_binaires.ipynb`](ch05_cours_1_formats_textuels_et_binaires.ipynb) | introduction du chapitre ; *Formats for Encoding Data* : *Language-Specific Formats*, *JSON, XML, and Binary Variants*, encadré *JSON Schema*, *Binary encoding* | compatibilités descendante et ascendante pendant un déploiement progressif (simulation, diagramme espace-temps du champ perdu) ; mémoire contre octets (diagramme) ; `pickle` : verrouillage, exécution de code au décodage, versions, taille ; JSON et les entiers au-delà de 2^53, Base64, échappement CSV, verbosité de XML ; MessagePack écrit à la main, carte d'octets, où passent les octets ; JSON Schema : validateur minimal, modèles ouverts et fermés, matrice de compatibilité |
+| [`ch05_cours_2_protocol_buffers.ipynb`](ch05_cours_2_protocol_buffers.ipynb) | *Protocol Buffers* ; *Field tags and schema evolution* | IDL et génération de code (diagramme) ; varints et zigzag (tailles, distributions réalistes) ; l'exemple en 33 octets, octet de clé et type d'onde, listes compactées ; ajout, suppression, réutilisation de numéro, `reserved`, saut des champs inconnus ; préservation des champs inconnus (diagramme espace-temps, simulation de déploiement) ; troncature int64 vers int32, simple vers répété ; matrice de compatibilité testée automatiquement |
 
 ## Labs (Docker)
 
