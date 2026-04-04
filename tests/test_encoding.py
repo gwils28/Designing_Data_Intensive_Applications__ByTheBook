@@ -226,3 +226,16 @@ def test_byte_map_se_dessine():
     b = E.avro_encode(R, E.PERSON_AVRO, tr)
     fig = E.draw_byte_map(b, tr, title="avro")
     assert fig is not None
+
+
+# ------------------------------------------------------------ JSON Schema
+def test_json_schema_open_closed():
+    ouvert = {"type": "object", "properties": {"port": {"type": "integer", "minimum": 1, "maximum": 65535}}}
+    ferme = {**ouvert, "additionalProperties": False}
+    assert E.json_schema_validate({"port": 80, "host": "a"}, ouvert) == []
+    assert len(E.json_schema_validate({"port": 80, "host": "a"}, ferme)) == 1
+    assert len(E.json_schema_validate({"port": 0}, ouvert)) == 1
+    carte = {"type": "object", "patternProperties": {"^[0-9]+$": {"type": "string"}},
+             "additionalProperties": False}
+    assert E.json_schema_validate({"12": "a", "7": "b"}, carte) == []
+    assert len(E.json_schema_validate({"12": 3, "x": "b"}, carte)) == 2
