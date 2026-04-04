@@ -20,6 +20,7 @@ Les fonctions réutilisables (varints et zigzag, JSON et MessagePack, Protocol B
 | Notebook | Exercices |
 |---|---|
 | [`ch05_exercices_01-06.ipynb`](ch05_exercices_01-06.ipynb) | 5.1 à 5.6 |
+| [`ch05_exercices_07-12.ipynb`](ch05_exercices_07-12.ipynb) | 5.7 à 5.12 |
 
 - **Ex. 5.1** - Compter les octets à la main en JSON, MessagePack, Protocol Buffers (`int64` contre `sint64`) et Avro.
 - **Ex. 5.2** - Varints, zigzag et encodage différentiel d'horodatages : tailles et seuils.
@@ -27,6 +28,12 @@ Les fonctions réutilisables (varints et zigzag, JSON et MessagePack, Protocol B
 - **Ex. 5.4** - Écrire un vérificateur d'évolution de schémas Protocol Buffers et l'appliquer à une revue de code.
 - **Ex. 5.5** - Décoder un enregistrement Avro à la main, prédire la résolution (alias, promotion, défaut), effet d'un octet corrompu.
 - **Ex. 5.6** - Registre de schémas : compatibilité non transitive, rétention et choix du mode.
+- **Ex. 5.7** - Modèle de Markov exact des champs perdus pendant un déploiement progressif, effet de sa durée.
+- **Ex. 5.8** - Dimensionner le stockage selon la façon de transporter le schéma de l'écrivain ; taille de bloc des fichiers conteneurs.
+- **Ex. 5.9** - Quels changements d'API sont sûrs selon l'ordre de déploiement et pour des clients jamais mis à jour.
+- **Ex. 5.10** - Délai d'expiration réglé sur la queue de latence, doublons des relances, amplification de charge.
+- **Ex. 5.11** - Exécution durable : doublons p/(1-p) sans idempotence, écritures au journal et rejeux, bogue de non-déterminisme.
+- **Ex. 5.12** - Faire évoluer un contrat JSON Schema : modèle fermé, modèle ouvert, « strict à l'écriture, tolérant à la lecture ».
 
 ## Labs (Docker)
 
