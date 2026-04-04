@@ -15,6 +15,19 @@ Les fonctions réutilisables (varints et zigzag, JSON et MessagePack, Protocol B
 | [`ch05_cours_5_services_rest_et_rpc.ipynb`](ch05_cours_5_services_rest_et_rpc.ipynb) | *Dataflow Through Services: REST and RPC* : *Web services*, *The problems with remote procedure calls*, *Load balancers, service discovery, and service meshes*, *Data encoding and evolution for RPC* | architecture de services (diagramme) ; un vrai service REST local ; appel de fonction contre appel HTTP (mesuré) ; issue inconnue après un délai expiré (diagramme espace-temps) ; idempotence réelle : sans clé, clé tardive, clé réservée ; relances et doublons simulés ; serveurs ou clients d'abord (simulation) ; accumulation des versions d'API ; maillage de services (diagramme), DNS en cache contre registre à battements de cœur |
 | [`ch05_cours_6_messages_et_acteurs.ipynb`](ch05_cours_6_messages_et_acteurs.ipynb) | *Event-Driven Architectures* : *Message brokers*, *Distributed actor frameworks* ; *Summary* | courtier écrit à la main : tampon pendant une panne (contre échecs RPC), files contre sujets, redistribution au moins une fois (diagramme espace-temps), requête-réponse par corrélation ; registre de schémas et republication qui perd ou préserve un champ ; acteurs répartis sur deux nœuds du simulateur, messages perdus ; bilan du chapitre |
 
+## Notebooks d'exercices
+
+| Notebook | Exercices |
+|---|---|
+| [`ch05_exercices_01-06.ipynb`](ch05_exercices_01-06.ipynb) | 5.1 à 5.6 |
+
+- **Ex. 5.1** - Compter les octets à la main en JSON, MessagePack, Protocol Buffers (`int64` contre `sint64`) et Avro.
+- **Ex. 5.2** - Varints, zigzag et encodage différentiel d'horodatages : tailles et seuils.
+- **Ex. 5.3** - Identifiants de 64 bits et doubles (dépassement de 2^53, probabilité de survie), surcoût de Base64.
+- **Ex. 5.4** - Écrire un vérificateur d'évolution de schémas Protocol Buffers et l'appliquer à une revue de code.
+- **Ex. 5.5** - Décoder un enregistrement Avro à la main, prédire la résolution (alias, promotion, défaut), effet d'un octet corrompu.
+- **Ex. 5.6** - Registre de schémas : compatibilité non transitive, rétention et choix du mode.
+
 ## Labs (Docker)
 
 | Notebook | Contenu |
