@@ -87,7 +87,7 @@ Lancer les tests : `pytest tests/`.
 | 2 | [Définir les exigences non fonctionnelles](notebooks/ch02_exigences_non_fonctionnelles) | ✅ |
 | 3 | [Modèles de données et langages de requête](notebooks/ch03_modeles_de_donnees) | ✅ |
 | 4 | [Stockage et recherche](notebooks/ch04_stockage_et_recherche) | ✅ |
-| 5 | [Encodage et évolution](notebooks/ch05_encodage_et_evolution) | 🚧 |
+| 5 | [Encodage et évolution](notebooks/ch05_encodage_et_evolution) | ✅ |
 | | *Partie II - Données distribuées* | |
 | 6 | Réplication | 🚧 |
 | 7 | Sharding | 🚧 |
