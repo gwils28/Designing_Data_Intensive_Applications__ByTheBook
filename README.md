@@ -103,8 +103,8 @@ Lancer les tests : `pytest tests/`.
 ## Labs Docker
 
 - [Chapitre 3 - Lab : tables, JSONB et requêtes récursives dans PostgreSQL](notebooks/ch03_modeles_de_donnees/ch03_lab_postgres_jsonb_et_recursif.ipynb)
-- [Chapitre 4 - Lab : évolution de schéma dans PostgreSQL](notebooks/ch04_encodage_et_evolution/ch04_lab_postgres_evolution.ipynb)
 - [Chapitre 4 - Lab : les index de PostgreSQL vus de l'intérieur](notebooks/ch04_stockage_et_recherche/ch04_lab_postgres_index.ipynb)
+- [Chapitre 5 - Lab : évolution de schéma dans PostgreSQL](notebooks/ch05_encodage_et_evolution/ch05_lab_postgres_evolution.ipynb)
 - [Chapitre 5 - Lab : réplication en streaming avec PostgreSQL](notebooks/ch05_replication/ch05_lab_replication_postgresql.ipynb)
 - [Chapitre 6 - Lab : Redis Cluster, un partitionnement par hachage grandeur nature](notebooks/ch06_partitionnement/ch06_lab_redis_cluster.ipynb)
 - [Chapitre 7 - Lab : niveaux d'isolation réels de PostgreSQL](notebooks/ch07_transactions/ch07_lab_isolation_postgresql.ipynb)
