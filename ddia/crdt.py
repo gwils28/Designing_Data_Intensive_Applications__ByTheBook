@@ -228,3 +228,52 @@ class RGA:
 
 # ------------------------------------------------- transformation opérationnelle
 NOOP = ("noop",)
+
+
+def ot_apply(text: str, op: tuple) -> str:
+    """op : ("ins", pos, char, site) | ("del", pos) | ("noop",)."""
+    if op[0] == "ins":
+        _, p, c, _ = op
+        return text[:p] + c + text[p:]
+    if op[0] == "del":
+        p = op[1]
+        return text[:p] + text[p + 1:]
+    return text
+
+
+def ot_transform(a: tuple, b: tuple) -> tuple:
+    """Transforme `a` pour qu'il s'applique **après** `b` (a et b concurrents, même état de
+    départ). Égalité de positions entre deux insertions : le site de plus petit nom passe
+    en premier."""
+    if a[0] == "noop" or b[0] == "noop":
+        return a
+    if a[0] == "ins" and b[0] == "ins":
+        _, p, c, s = a
+        q, t = b[1], b[3]
+        return a if (p < q or (p == q and s < t)) else ("ins", p + 1, c, s)
+    if a[0] == "ins" and b[0] == "del":
+        _, p, c, s = a
+        return a if p <= b[1] else ("ins", p - 1, c, s)
+    if a[0] == "del" and b[0] == "ins":
+        p = a[1]
+        return a if p < b[1] else ("del", p + 1)
+    p, q = a[1], b[1]
+    if p < q:
+        return a
+    if p > q:
+        return ("del", p - 1)
+    return NOOP
+
+
+def ot_transform_seq(A: list[tuple], B: list[tuple]) -> tuple[list[tuple], list[tuple]]:
+    """Transforme deux suites concurrentes : renvoie (A', B') telles que
+    appliquer B puis A' donne le même texte qu'appliquer A puis B'."""
+    A2 = []
+    for a in A:
+        B2 = []
+        for b in B:
+            a, b = ot_transform(a, b), ot_transform(b, a)
+            B2.append(b)
+        A2.append(a)
+        B = B2
+    return A2, B
