@@ -14,6 +14,19 @@ Les fonctions réutilisables (nœuds leader/suiveur avec époques et contrôleur
 | [`ch06_cours_4_sans_leader.ipynb`](ch06_cours_4_sans_leader.ipynb) | *Leaderless Replication* : *Writing to the Database When a Node Is Down*, *Catching up on missed writes*, *Using quorums for reading and writing*, *Understanding the limitations of quorum consistency*, *Monitoring staleness*, *Single-Leader Versus Leaderless Replication Performance*, *Multi-Region Operation* | écriture et lecture par quorum avec lecture réparatrice simulées (diagramme espace-temps) ; lecture réparatrice contre anti-entropie ; arbres de Merkle ; probabilité de lecture périmée et disponibilité selon (w, r) ; modèle PBS ; lecture qui recule et écriture en échec qui survit ; quorum approximatif et transfert différé simulés ; pannes grises et couverture de requêtes ; niveaux de cohérence multi-régions |
 | [`ch06_cours_5_ecritures_concurrentes.ipynb`](ch06_cours_5_ecritures_concurrentes.ipynb) | *Detecting Concurrent Writes* : *The happens-before relation and concurrency*, encadré *Concurrency, Time, and Relativity*, *Capturing the happens-before relationship*, *Version vectors* | divergence sans règle de résolution (simulation) ; relation « arrivé avant » calculée par vecteurs (diagramme espace-temps, matrice des relations) ; le panier du livre rejoué pas à pas et son graphe causal ; explosion des frères ; vecteurs de versions pointés ; pertes d'écritures comparées : LWW, vecteur naïf, vecteur pointé |
 
+## Notebooks d'exercices
+
+| Notebook | Exercices |
+|---|---|
+| [`ch06_exercices_01-06.ipynb`](ch06_exercices_01-06.ipynb) | 6.1 à 6.6 |
+
+- **Ex. 6.1** - Latence d'écriture par mode de réplication (statistiques d'ordre), écritures perdues lors d'une panne, survivre à la perte d'une zone.
+- **Ex. 6.2** - Monter un suiveur sur 3 To : copie, rattrapage, journal à conserver, pic de charge qui empêche de rattraper.
+- **Ex. 6.3** - Délai de basculement optimal à partir d'une distribution des silences ; numéros de commande réattribués après basculement.
+- **Ex. 6.4** - Quelles instructions répliquer telles quelles ; rendre la réplication par instructions déterministe (mini-lab).
+- **Ex. 6.5** - Dimensionner « lire ses écritures » : charge du leader avec une fenêtre, fenêtre contre jeton sous blocage d'un suiveur.
+- **Ex. 6.6** - Probabilités des anomalies de lectures monotones et de préfixe cohérent, formules et Monte-Carlo.
+
 ## Lab (Docker)
 
 | Notebook | Contenu |
