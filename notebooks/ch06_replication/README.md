@@ -19,6 +19,7 @@ Les fonctions réutilisables (nœuds leader/suiveur avec époques et contrôleur
 | Notebook | Exercices |
 |---|---|
 | [`ch06_exercices_01-06.ipynb`](ch06_exercices_01-06.ipynb) | 6.1 à 6.6 |
+| [`ch06_exercices_07-12.ipynb`](ch06_exercices_07-12.ipynb) | 6.7 à 6.12 |
 
 - **Ex. 6.1** - Latence d'écriture par mode de réplication (statistiques d'ordre), écritures perdues lors d'une panne, survivre à la perte d'une zone.
 - **Ex. 6.2** - Monter un suiveur sur 3 To : copie, rattrapage, journal à conserver, pic de charge qui empêche de rattraper.
@@ -26,6 +27,12 @@ Les fonctions réutilisables (nœuds leader/suiveur avec époques et contrôleur
 - **Ex. 6.4** - Quelles instructions répliquer telles quelles ; rendre la réplication par instructions déterministe (mini-lab).
 - **Ex. 6.5** - Dimensionner « lire ses écritures » : charge du leader avec une fenêtre, fenêtre contre jeton sous blocage d'un suiveur.
 - **Ex. 6.6** - Probabilités des anomalies de lectures monotones et de préfixe cohérent, formules et Monte-Carlo.
+- **Ex. 6.7** - Multi-leader : LWW et horloges NTP, identifiants modulo k, conflits d'un agenda hors ligne (simulation).
+- **Ex. 6.8** - Choisir une topologie : messages, sauts, délais, disponibilité, dépassements simulés.
+- **Ex. 6.9** - Choisir n, w, r : recouvrement, pannes tolérées, PBS, latence de queue, quorum approximatif.
+- **Ex. 6.10** - Vecteurs de versions pointés à la main sur deux répliques, comparaison avec LWW.
+- **Ex. 6.11** - Propriétés de la fusion d'un CRDT, 2P-Set contre OR-Set, test de convergence aléatoire.
+- **Ex. 6.12** - Transformation opérationnelle à la main, départage dans un RGA, fuzzing d'une transformation boguée.
 
 ## Lab (Docker)
 
