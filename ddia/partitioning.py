@@ -409,6 +409,32 @@ class HashRing:
         return dict(out)
 
 
+def rendezvous_node(key, nodes: Sequence[str]) -> str:
+    """Hachage de rendez-vous (highest random weight) : le nœud de plus grand score h(clé, nœud)."""
+    return max(nodes, key=lambda n: stable_hash(f"{key}|{n}", 64))
+
+
+def jump_hash(key: int, n_buckets: int) -> int:
+    """Jump consistent hash (Lamping et Veach, 2014) : seau dans [0, n_buckets).
+
+    Passer de n à n + 1 seaux ne déplace que les clés qui vont dans le nouveau seau
+    (une fraction 1 / (n + 1)) ; aucune table à stocker, mais les seaux sont numérotés
+    et l'on ne peut retirer que le dernier.
+    """
+    k = int(key) & MASK64
+    b, j = -1, 0
+    while j < n_buckets:
+        b = j
+        k = (k * 2862933555777941757 + 1) & MASK64
+        j = int((b + 1) * (float(1 << 31) / float((k >> 33) + 1)))
+    return b
+
+
+# =====================================================================================
+# 5. Charges asymétriques et clés chaudes
+# =====================================================================================
+
+
 def zipf_weights(n_keys: int, s: float = 1.0) -> np.ndarray:
     """Probabilités d'une loi de Zipf : la clé de rang r est demandée ∝ 1 / r^s."""
     w = 1.0 / np.arange(1, n_keys + 1) ** s
