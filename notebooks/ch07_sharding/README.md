@@ -13,6 +13,19 @@ Les fonctions réutilisables (hachage stable, `mix64`, CRC16 et slots de Redis C
 | [`ch07_cours_3_points_chauds_et_routage.ipynb`](ch07_cours_3_points_chauds_et_routage.ipynb) | *Skewed Workloads and Relieving Hot Spots* ; *Request Routing* | charge Zipf par shard et plancher n·w1 ; message viral et capacité d'un nœud ; salage dimensionné (collisions de sous-clés), compteur salé avec registre, détection par échantillonnage ; placement des clés chaudes et répartition de la clé n°1 ; trois architectures de routage (diagramme) simulées sur `ddia.sim` ; service de coordination (diagramme), redirection `MOVED` sur carte périmée (diagramme espace-temps), redirections selon le délai de notification ; diffusion épidémique ; accélération d'une requête analytique parallèle |
 | [`ch07_cours_4_index_secondaires.ipynb`](ch07_cours_4_index_secondaires.ipynb) | *Sharding and Secondary Indexes* : *Local Secondary Indexes*, *Global Secondary Indexes* | dispersion des valeurs indexées sur tous les shards (20 000 annonces de voitures) ; index locaux (diagramme, écriture sur un seul shard), dérive d'un index maintenu à la main quand une écriture échoue à moitié ; scatter/gather : 1-(1-p)^n, p50/p99 simulés jusqu'à 128 shards, débit plafonné à C/f (loi d'Amdahl) ; index globaux (diagramme) : écritures sur 2 à 3 shards, point chaud des termes populaires, conjonctions et listes de postings transférées, mise à jour asynchrone (diagramme espace-temps, probabilité d'une lecture périmée) ; modèle de coût local contre global, point de bascule selon le rapport lectures/écritures, tableau récapitulatif |
 
+## Notebooks d'exercices
+
+| Notebook | Exercices |
+|---|---|
+| [`ch07_exercices_01-06.ipynb`](ch07_exercices_01-06.ipynb) | 7.1 à 7.6 |
+
+- **Ex. 7.1** - Choisir une clé de sharding (capteurs, commandes, réseau social) : déséquilibre en écriture, morceaux lus par requête, célébrité en loi de Zipf (simulation).
+- **Ex. 7.2** - Balles dans des urnes : écart relatif en $\sqrt{2\ln n/\lambda}$, nombre de clés par morceau pour un équilibre à 10 % (calcul affiné et simulation).
+- **Ex. 7.3** - Modulo N déplace $N/(N+1)$ des clés (démonstration par les restes chinois) contre $1/(N+1)$ ; part d'un nœud sur l'anneau en $1/\sqrt{v}$ (vérification).
+- **Ex. 7.4** - Dimensionner un nombre fixe de shards pour une croissance de 2 à 200 To, diviseurs de 5 040, coût des scissions générales.
+- **Ex. 7.5** - Mini-lab : scissions de plages avec fusion après une purge, et oscillation scission/fusion sans hystérésis.
+- **Ex. 7.6** - Salage d'une clé chaude : nombre de suffixes avec collisions du hachage (probabilité exacte et simulation), amplification des lectures, agrégat en cache.
+
 ## Lab (Docker)
 
 | Notebook | Contenu |
