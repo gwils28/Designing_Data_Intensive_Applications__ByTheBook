@@ -18,6 +18,7 @@ Les fonctions réutilisables (hachage stable, `mix64`, CRC16 et slots de Redis C
 | Notebook | Exercices |
 |---|---|
 | [`ch07_exercices_01-06.ipynb`](ch07_exercices_01-06.ipynb) | 7.1 à 7.6 |
+| [`ch07_exercices_07-12.ipynb`](ch07_exercices_07-12.ipynb) | 7.7 à 7.12 |
 
 - **Ex. 7.1** - Choisir une clé de sharding (capteurs, commandes, réseau social) : déséquilibre en écriture, morceaux lus par requête, célébrité en loi de Zipf (simulation).
 - **Ex. 7.2** - Balles dans des urnes : écart relatif en $\sqrt{2\ln n/\lambda}$, nombre de clés par morceau pour un équilibre à 10 % (calcul affiné et simulation).
@@ -25,6 +26,12 @@ Les fonctions réutilisables (hachage stable, `mix64`, CRC16 et slots de Redis C
 - **Ex. 7.4** - Dimensionner un nombre fixe de shards pour une croissance de 2 à 200 To, diviseurs de 5 040, coût des scissions générales.
 - **Ex. 7.5** - Mini-lab : scissions de plages avec fusion après une purge, et oscillation scission/fusion sans hystérésis.
 - **Ex. 7.6** - Salage d'une clé chaude : nombre de suffixes avec collisions du hachage (probabilité exacte et simulation), amplification des lectures, agrégat en cache.
+- **Ex. 7.7** - Trouver l'anomalie : écriture acquittée puis perdue chez l'ancien propriétaire (diagrammes espace-temps), correction par contrôle de propriété et époque de la carte (mini-lab).
+- **Ex. 7.8** - Scatter/gather : $1-(1-p)^n$, percentiles simulés selon n, requêtes de couverture déclenchées au p95.
+- **Ex. 7.9** - Index local ou global : modèle de coût, seuil de bascule selon la part d'écritures, vérification avec `LocalIndexDB` / `GlobalIndexDB`, limites du modèle.
+- **Ex. 7.10** - Durée des transferts de rééquilibrage, carte de la défaillance en cascade (utilisation × surcoût de migration), patience du détecteur.
+- **Ex. 7.11** - Multi-location : rangement first-fit decreasing de 2 000 locataires, géants, voisin bruyant, croissance et politiques de déplacement.
+- **Ex. 7.12** - Faut-il sharder ? Années avant de saturer une machine, probabilité qu'une transaction reste sur un seul shard, effet d'une clé « client ».
 
 ## Lab (Docker)
 
