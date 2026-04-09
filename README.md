@@ -89,7 +89,7 @@ Lancer les tests : `pytest tests/`.
 | 4 | [Stockage et recherche](notebooks/ch04_stockage_et_recherche) | ✅ |
 | 5 | [Encodage et évolution](notebooks/ch05_encodage_et_evolution) | ✅ |
 | | *Partie II - Données distribuées* | |
-| 6 | [Réplication](notebooks/ch06_replication) | 🚧 |
+| 6 | [Réplication](notebooks/ch06_replication) | ✅ |
 | 7 | Sharding | 🚧 |
 | 8 | Transactions | 🚧 |
 | 9 | Les problèmes des systèmes distribués | 🚧 |
