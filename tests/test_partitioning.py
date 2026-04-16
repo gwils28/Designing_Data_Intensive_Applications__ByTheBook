@@ -80,6 +80,17 @@ def test_anneau_coherent():
     assert 0.18 < P.moved_fraction(before, after) < 0.32
 
 
+def test_rendezvous_et_jump():
+    keys = range(5_000)
+    a = [P.rendezvous_node(k, ["a", "b", "c"]) for k in keys]
+    b = [P.rendezvous_node(k, ["a", "b", "c", "d"]) for k in keys]
+    assert all(y == "d" for x, y in zip(a, b) if x != y)
+    j10 = np.array([P.jump_hash(k, 10) for k in keys])
+    j11 = np.array([P.jump_hash(k, 11) for k in keys])
+    assert set(j11[j10 != j11]) == {10} and 0.07 < np.mean(j10 != j11) < 0.11
+    assert np.bincount(j10).min() > 400
+
+
 def test_zipf_et_sel():
     w = P.zipf_weights(1000, 1.0)
     assert abs(w.sum() - 1) < 1e-12 and w[0] > 100 * w[-1]
