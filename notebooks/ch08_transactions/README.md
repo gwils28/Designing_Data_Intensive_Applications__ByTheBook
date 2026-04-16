@@ -1,0 +1,23 @@
+# Chapitre 8 - Transactions
+
+Le chapitre 8 explique ce que garantit vraiment une transaction : l'atomicité (abandon sûr, journal), la cohérence (invariants de l'application), l'isolation et la durabilité. L'essentiel porte sur l'isolation : les niveaux faibles (read committed, snapshot isolation et MVCC), les anomalies qu'ils laissent passer (lecture biaisée, mise à jour perdue, write skew, fantômes) et les trois façons d'obtenir la sérialisabilité (exécution en série, verrouillage à deux phases, SSI). La fin du chapitre traite des transactions distribuées : validation à deux phases (2PC), XA, transactions internes des bases NewSQL et traitement « exactement une fois » par idempotence. Les notebooks rejouent chaque anomalie sur un mini-moteur MVCC écrit à la main, simulent 2PC sous pannes, et reproduisent le tout sur un vrai PostgreSQL.
+
+Les fonctions réutilisables (journal d'écriture anticipée avec sommes de contrôle, moteur transactionnel MVCC à six niveaux d'isolation avec verrous, verrous de prédicat et détection SSI, ordonnanceur de transactions écrites comme des générateurs, test de sérialisabilité, graphe de précédence, frises d'exécution, charge synthétique, simulation de 2PC sur `ddia.sim`) sont dans [`ddia/transactions.py`](../../ddia/transactions.py), testées par [`tests/test_transactions.py`](../../tests/test_transactions.py). Le traitement « exactement une fois » par déduplication est dans [`ddia/exactly_once.py`](../../ddia/exactly_once.py) ([`tests/test_exactly_once.py`](../../tests/test_exactly_once.py)).
+
+## Notebooks de cours
+
+| Notebook | Sections du livre | Contenu |
+|---|---|---|
+| [`ch08_cours_1_acid_et_atomicite.ipynb`](ch08_cours_1_acid_et_atomicite.ipynb) | introduction ; *What Exactly Is a Transaction?* (*The Meaning of ACID*, *Replication and Durability*, *Single-Object and Multi-Object Operations*, *Handling errors and aborts*) | points de défaillance (diagramme) ; ACID lettre par lettre, la course de deux incréments ; journal d'écriture anticipée implémenté, panne injectée à chaque octet contre écriture en place ; fsync mesuré, validation groupée, pannes corrélées et réplication ; lecture sale d'un compteur dénormalisé, atomicité multi-objets avec SQLite ; emballement des réessais sous charge |
+
+## Labs (Docker)
+
+Les labs utilisent PostgreSQL 16 (`docker/transactions/compose.yml`, port hôte 10832) :
+
+```bash
+docker compose -f docker/transactions/compose.yml -p ddia_transactions up -d
+docker compose -f docker/transactions/compose.yml -p ddia_transactions down -v
+```
+
+| Notebook | Contenu |
+|---|---|
