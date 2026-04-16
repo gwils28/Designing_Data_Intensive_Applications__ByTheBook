@@ -9,6 +9,7 @@ Les fonctions réutilisables (journal d'écriture anticipée avec sommes de cont
 | Notebook | Sections du livre | Contenu |
 |---|---|---|
 | [`ch08_cours_1_acid_et_atomicite.ipynb`](ch08_cours_1_acid_et_atomicite.ipynb) | introduction ; *What Exactly Is a Transaction?* (*The Meaning of ACID*, *Replication and Durability*, *Single-Object and Multi-Object Operations*, *Handling errors and aborts*) | points de défaillance (diagramme) ; ACID lettre par lettre, la course de deux incréments ; journal d'écriture anticipée implémenté, panne injectée à chaque octet contre écriture en place ; fsync mesuré, validation groupée, pannes corrélées et réplication ; lecture sale d'un compteur dénormalisé, atomicité multi-objets avec SQLite ; emballement des réessais sous charge |
+| [`ch08_cours_2_isolation_faible.ipynb`](ch08_cours_2_isolation_faible.ipynb) | *Weak Isolation Levels* : *Read Committed*, *Snapshot Isolation and Repeatable Read* | les 20 entrelacements de deux incréments à chaque niveau ; lecture sale, écriture sale (frises) ; verrous de lecture contre deux versions ; lecture biaisée et sauvegardes incohérentes (300 essais) ; MVCC (versions `created_by` / `deleted_by`, chaîne de versions), règles de visibilité (matrice), ramasse-miettes et transaction longue, B-arbre en copie sur écriture ; la confusion des noms |
 
 ## Labs (Docker)
 
