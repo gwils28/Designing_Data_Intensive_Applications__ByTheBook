@@ -13,6 +13,17 @@ Les fonctions réutilisables (journal d'écriture anticipée avec sommes de cont
 | [`ch08_cours_3_mises_a_jour_perdues_et_write_skew.ipynb`](ch08_cours_3_mises_a_jour_perdues_et_write_skew.ipynb) | *Preventing Lost Updates* ; *Write Skew and Phantoms* | pertes selon la concurrence ; incrément atomique, `FOR UPDATE`, interblocage et graphe d'attente, détection automatique (PostgreSQL contre InnoDB), CAS et réessais, LWW contre CRDT ; médecins de garde, graphe de précédence cyclique ; fantômes de réservation, contrainte d'unicité, matérialisation des conflits ; tableau expérimental de six anomalies sous sept niveaux |
 | [`ch08_cours_4_serialisabilite.ipynb`](ch08_cours_4_serialisabilite.ipynb) | *Serializability* : *Actual Serial Execution*, *Two-Phase Locking*, *Serializable Snapshot Isolation* | sérialisabilité par force brute et par graphe de précédence ; transaction interactive contre procédure stockée (espace-temps, débit), déterminisme et réplication, plafond des transactions multi-shards ; 2PL (compatibilité, deux phases, preuve), lecture longue qui bloque les écritures, verrous de prédicat et faux conflits des verrous d'intervalle ; SSI (prémisses périmées, algorithme simplifié et preuve) ; série, 2PL et SSI sous contention |
 
+## Notebooks d'exercices
+
+| Notebook | Exercices |
+|---|---|
+| [`ch08_exercices_01-04.ipynb`](ch08_exercices_01-04.ipynb) | 8.1 à 8.4 |
+
+- **Ex. 8.1** - Journal et fsync : débit avec et sans validation groupée, simulation de la latence ; journal mal ordonné et journal sans somme de contrôle cassés par injection de pannes.
+- **Ex. 8.2** - Diagnostiquer six historiques (anomalie, niveau minimal) et vérifier sur le moteur.
+- **Ex. 8.3** - Visibilité MVCC à la main ; gonflement des tables par une transaction longue (formule et simulation).
+- **Ex. 8.4** - Le « paradoxe des anniversaires » des mises à jour perdues (formule exacte, simulation) et le coût du CAS.
+
 ## Labs (Docker)
 
 Les labs utilisent PostgreSQL 16 (`docker/transactions/compose.yml`, port hôte 10832) :
