@@ -18,11 +18,16 @@ Les fonctions réutilisables (journal d'écriture anticipée avec sommes de cont
 | Notebook | Exercices |
 |---|---|
 | [`ch08_exercices_01-04.ipynb`](ch08_exercices_01-04.ipynb) | 8.1 à 8.4 |
+| [`ch08_exercices_05-08.ipynb`](ch08_exercices_05-08.ipynb) | 8.5 à 8.8 |
 
 - **Ex. 8.1** - Journal et fsync : débit avec et sans validation groupée, simulation de la latence ; journal mal ordonné et journal sans somme de contrôle cassés par injection de pannes.
 - **Ex. 8.2** - Diagnostiquer six historiques (anomalie, niveau minimal) et vérifier sur le moteur.
 - **Ex. 8.3** - Visibilité MVCC à la main ; gonflement des tables par une transaction longue (formule et simulation).
 - **Ex. 8.4** - Le « paradoxe des anniversaires » des mises à jour perdues (formule exacte, simulation) et le coût du CAS.
+- **Ex. 8.5** - Atelier à places limitées : quand `FOR UPDATE` suffit, matérialisation du conflit.
+- **Ex. 8.6** - Graphes de précédence à la main ; 400 entrelacements aléatoires, preuve expérimentale que 2PL est sérialisable.
+- **Ex. 8.7** - Dimensionner une base à exécution en série shardée (modèle et simulation).
+- **Ex. 8.8** - 2PL contre SSI selon la part de lectures seules (mini-lab).
 
 ## Labs (Docker)
 
