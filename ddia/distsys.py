@@ -292,6 +292,50 @@ def voice_over_packets(load_cross: float, n_frames: int = 20_000, frame_size: fl
     return delay[is_voice[order]]
 
 
+def tcp_failure_outcomes(n_trials: int = 2000, n_requests: int = 20, seed: int = 0,
+                         policy: str = "tout_renvoyer") -> Dict[str, float]:
+    """Que deviennent des requêtes envoyées sur une connexion TCP qui se rompt ?
+
+    Au moment de la rupture, chaque requête est dans un des états :
+    répondue (réponse applicative reçue), traitée sans réponse reçue, acquittée par le
+    noyau distant mais pas encore traitée par l'application (perdue si celle-ci tombe),
+    ou pas encore acquittée. Le client se reconnecte et applique une politique :
+
+    - "acquittements_tcp" : renvoie seulement ce que TCP n'a pas acquitté ;
+    - "tout_renvoyer" : renvoie tout ce qui n'a pas reçu de réponse applicative ;
+    - "identifiants" : idem, avec un identifiant de requête que le serveur déduplique.
+
+    Renvoie la proportion de requêtes perdues, exécutées une fois, exécutées deux fois.
+    """
+    rng = np.random.default_rng(seed)
+    lost = once = twice = 0
+    for _ in range(n_trials):
+        # frontières aléatoires du « tuyau » : r <= p <= a <= n
+        cuts = np.sort(rng.integers(0, n_requests + 1, 3))
+        r, p, a = cuts
+        app_crashed = rng.random() < 0.5      # rupture due au crash de l'appli (sinon réseau)
+        n_resp, n_proc, n_ack, n_unack = r, p - r, a - p, n_requests - a
+        # requêtes acquittées non traitées : traitées plus tard si l'appli survit
+        ack_executed = 0 if app_crashed else n_ack
+        if policy == "acquittements_tcp":
+            once += n_resp + n_proc + ack_executed + n_unack
+            lost += n_ack - ack_executed
+        elif policy == "tout_renvoyer":
+            once += n_resp + n_unack + (n_ack - ack_executed)
+            twice += n_proc + ack_executed
+        elif policy == "identifiants":
+            once += n_requests
+        else:
+            raise ValueError(policy)
+    tot = n_trials * n_requests
+    return {"perdues": float(lost / tot), "une_fois": float(once / tot), "deux_fois": float(twice / tot)}
+
+
+# =====================================================================================
+# 2. Horloges
+# =====================================================================================
+
+
 def drift_error(ppm: float, seconds: float) -> float:
     """Écart accumulé (en secondes) par une horloge qui dérive de `ppm` pendant `seconds`."""
     return ppm * 1e-6 * seconds
@@ -1104,3 +1148,66 @@ def token_generator_history(n_requests: int = 60, crash_at: Optional[float] = 30
 # =====================================================================================
 # 6. Compléments : répliques sans leader, nœuds boiteux
 # =====================================================================================
+
+
+def fenced_lww_demo(use_token: bool = True, token_bits: int = 40) -> Dict[str, object]:
+    """Clôture avec plusieurs répliques sans leader (réplication LWW).
+
+    Le client 2 (jeton 34) écrit sur les répliques 1 et 2 (la 3 est injoignable) ; le
+    zombie client 1 (jeton 33) écrit ensuite sur les trois. Les horodatages sont soit
+    l'heure du client (ms), soit (jeton << token_bits) | heure. Renvoie l'état des
+    répliques et le résultat d'une lecture de quorum sur chaque paire de répliques.
+    """
+    def stamp(token, clock_ms):
+        return (token << token_bits) | clock_ms if use_token else clock_ms
+
+    replicas = {r: (None, -1) for r in ("r1", "r2", "r3")}
+    # client 2 : heure 1_000_500 ms ; client 1 (zombie) : son horloge avance, 1_000_900
+    ops = [("client2", 34, 1_000_500, ("r1", "r2")),
+           ("client1", 33, 1_000_900, ("r1", "r2", "r3"))]
+    log = []
+    for client, tok, clock, targets in ops:
+        ts = stamp(tok, clock)
+        for r in targets:
+            cur = replicas[r]
+            accepted = ts > cur[1]
+            if accepted:
+                replicas[r] = (client, ts)
+            log.append((client, r, accepted))
+    reads = {}
+    for pair in itertools.combinations(replicas, 2):
+        best = max((replicas[r] for r in pair), key=lambda v: v[1])
+        reads["+".join(pair)] = best[0]
+    return {"repliques": {r: v[0] for r, v in replicas.items()}, "lectures": reads, "log": log}
+
+
+def limping_node_sim(n_nodes: int = 10, slow_factor: float = 40.0, n_requests: int = 100_000,
+                     policy: str = "tourniquet", window: int = 2000, seed: int = 0) -> Dict[str, object]:
+    """Panne grise : un nœud répond encore aux contrôles de santé mais devient très lent.
+
+    Temps de service log-normaux (médiane 5 ms) ; le nœud 0 est `slow_factor` fois plus
+    lent à partir du milieu de l'expérience. Politiques :
+
+    - "tourniquet" : répartition uniforme, le contrôle de santé (« répond-il ? ») passe ;
+    - "ejection" : toutes les `window` requêtes, on retire un nœud dont la médiane
+      observée dépasse 5 fois la médiane du parc (détection par les latences).
+    """
+    rng = np.random.default_rng(seed)
+    base = 0.005 * np.exp(0.4 * rng.standard_normal(n_requests))
+    active = list(range(n_nodes))
+    lat = np.empty(n_requests)
+    obs: Dict[int, List[float]] = defaultdict(list)
+    ejected_at = None
+    for i in range(n_requests):
+        node = active[rng.integers(len(active))]
+        slow = node == 0 and i >= n_requests // 2
+        lat[i] = base[i] * (slow_factor if slow else 1.0)
+        obs[node].append(lat[i])
+        if policy == "ejection" and (i + 1) % window == 0 and len(active) > 1:
+            meds = {k: np.median(v[-200:]) for k, v in obs.items() if k in active and v}
+            fleet = np.median(list(meds.values()))
+            bad = [k for k, m in meds.items() if m > 5 * fleet]
+            for k in bad:
+                active.remove(k)
+                ejected_at = ejected_at or i
+    return {"latences": lat, "ejection": ejected_at}
