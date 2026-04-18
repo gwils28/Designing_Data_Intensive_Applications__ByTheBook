@@ -180,3 +180,74 @@ def random_faults(seed: int, horizon: float = 120.0, n_clients: int = 3,
             faults.append(Fault("crash_verrous", round(rng.uniform(5, horizon - 10), 2),
                                 "verrous", round(rng.uniform(0.5, 4), 2)))
     return sorted(faults, key=lambda f: f.t)
+
+
+@dataclass
+class DSTResult:
+    ok: bool
+    violations: list
+    digest: str
+    n_messages: int
+    accepted: int
+    rejected: int
+    net: Network
+    store: FencedStorage
+
+
+def trace_digest(net: Network) -> str:
+    """Empreinte de la trace complète des messages : deux exécutions identiques ont la même."""
+    h = hashlib.sha256()
+    for d in net.trace:
+        h.update(f"{d.src}>{d.dst}:{d.msg!r}@{d.t_send:.9f}/{d.t_recv:.9f}/{d.lost}\n".encode())
+    return h.hexdigest()[:16]
+
+
+def run_lease_system(faults: Sequence[Fault], seed: int = 0, persist_counter: bool = True,
+                     fencing: bool = True, n_clients: int = 3, horizon: float = 120.0,
+                     lease: float = 5.0, drop: float = 0.02, grace: bool = False) -> DSTResult:
+    """Exécute le système verrous + stockage + clients sous un scénario de fautes donné.
+
+    Tout le non-déterminisme (latences, pertes, fautes) vient de `seed` et de `faults` :
+    la même entrée produit exactement la même trace.
+    """
+    net = Network(seed=seed, latency=(0.2, 1.2), drop=drop)
+    net.add(LockService(lease=lease, first_token=1, persist_counter=persist_counter, grace=grace))
+    store = net.add(FencedStorage(fencing=fencing))
+    for i in range(n_clients):
+        net.add(LeaseClient(f"c{i}", start=0.3 * i, work=0.7, n_writes=1, retry=1.0, forever=True))
+    for f in faults:
+        if f.kind == "pause":
+            net.at(f.t, net[f.target].freeze, f.duration)
+        elif f.kind == "crash_verrous":
+            net.at(f.t, net.crash, "verrous")
+            net.at(f.t + f.duration, net.recover, "verrous")
+    net.run(until=horizon)
+    viol = token_order_violations(store)
+    acc = sum(w.accepted for w in store.writes)
+    return DSTResult(not viol, viol, trace_digest(net), len(net.trace), acc,
+                     len(store.writes) - acc, net, store)
+
+
+def find_failing_seed(seeds, **kw) -> Optional[Tuple[int, List[Fault], DSTResult]]:
+    """Parcourt des graines ; renvoie la première dont le scénario viole l'invariant."""
+    for s in seeds:
+        faults = random_faults(s, horizon=kw.get("horizon", 120.0), n_clients=kw.get("n_clients", 3))
+        res = run_lease_system(faults, seed=s, **kw)
+        if not res.ok:
+            return s, faults, res
+    return None
+
+
+def shrink_faults(faults: Sequence[Fault], seed: int, **kw) -> List[Fault]:
+    """Réduit un scénario fautif : retire les fautes une à une tant que l'échec persiste."""
+    cur = list(faults)
+    changed = True
+    while changed:
+        changed = False
+        for i in range(len(cur)):
+            cand = cur[:i] + cur[i + 1:]
+            if not run_lease_system(cand, seed=seed, **kw).ok:
+                cur = cand
+                changed = True
+                break
+    return cur
