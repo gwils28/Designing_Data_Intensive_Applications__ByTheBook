@@ -19,6 +19,7 @@ Les fonctions réutilisables (journal d'écriture anticipée avec sommes de cont
 |---|---|
 | [`ch08_exercices_01-04.ipynb`](ch08_exercices_01-04.ipynb) | 8.1 à 8.4 |
 | [`ch08_exercices_05-08.ipynb`](ch08_exercices_05-08.ipynb) | 8.5 à 8.8 |
+| [`ch08_exercices_09-12.ipynb`](ch08_exercices_09-12.ipynb) | 8.9 à 8.12 |
 
 - **Ex. 8.1** - Journal et fsync : débit avec et sans validation groupée, simulation de la latence ; journal mal ordonné et journal sans somme de contrôle cassés par injection de pannes.
 - **Ex. 8.2** - Diagnostiquer six historiques (anomalie, niveau minimal) et vérifier sur le moteur.
@@ -28,6 +29,10 @@ Les fonctions réutilisables (journal d'écriture anticipée avec sommes de cont
 - **Ex. 8.6** - Graphes de précédence à la main ; 400 entrelacements aléatoires, preuve expérimentale que 2PL est sérialisable.
 - **Ex. 8.7** - Dimensionner une base à exécution en série shardée (modèle et simulation).
 - **Ex. 8.8** - 2PL contre SSI selon la part de lectures seules (mini-lab).
+- **Ex. 8.9** - Coût de 2PC (latence, fsync, verrous) et fréquence des transactions en doute.
+- **Ex. 8.10** - Injection exhaustive de doubles pannes dans 2PC ; validation en une phase en comparaison.
+- **Ex. 8.11** - Protocole de terminaison coopératif : quels blocages il lève, lesquels restent.
+- **Ex. 8.12** - Exactement une fois par déduplication : l'ordre des étapes, une variante fautive, l'espace occupé.
 
 ## Labs (Docker)
 
