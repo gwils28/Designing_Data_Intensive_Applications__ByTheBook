@@ -20,6 +20,7 @@ Les fonctions réutilisables (délais aller-retour à queue lourde, détecteurs 
 | Notebook | Exercices |
 |---|---|
 | [`ch09_exercices_01-06.ipynb`](ch09_exercices_01-06.ipynb) | 9.1 à 9.6 |
+| [`ch09_exercices_07-12.ipynb`](ch09_exercices_07-12.ipynb) | 9.7 à 9.12 |
 
 - **Ex. 9.1** - Pannes partielles à l'échelle d'un parc : pannes quotidiennes, requêtes éclatées, effet de la redondance (calcul et Monte-Carlo).
 - **Ex. 9.2** - Relances, idempotence et durée de rétention des identifiants de requête (raisonnement et mini-lab sur le simulateur).
@@ -27,6 +28,12 @@ Les fonctions réutilisables (délais aller-retour à queue lourde, détecteurs 
 - **Ex. 9.4** - Le détecteur phi accrual à la main, puis face à une gigue qui triple (calcul et mini-lab).
 - **Ex. 9.5** - Tampon de commutateur : formule M/M/1/K, compromis pertes/délai, trafic en rafales (calcul et simulation).
 - **Ex. 9.6** - Budget d'horloge, calcul NTP à partir de quatre horodatages, serveurs menteurs et Marzullo (calcul).
+- **Ex. 9.7** - LWW et écritures perdues : approximation, simulation, correction par lecture préalable (calcul et simulation).
+- **Ex. 9.8** - Commit wait de Spanner : incertitude en dent de scie, attente, débit d'une donnée chaude (calcul).
+- **Ex. 9.9** - Bail, pause et marge : écritures hors bail par jour, effet de la marge et des jetons de clôture (calcul et simulation).
+- **Ex. 9.10** - Majorités, menteurs et propriétés : intersections de quorums, n > 3f, sûreté ou vivacité (raisonnement).
+- **Ex. 9.11** - Model checking d'un verrou : sans bail il se bloque, avec bail il n'exclut plus, la clôture réconcilie les deux (mini-lab).
+- **Ex. 9.12** - Simulation déterministe : trouver, rejouer et réduire un bogue de reprise, réfuter une correction plausible (mini-lab).
 
 ## Labs (Docker)
 
