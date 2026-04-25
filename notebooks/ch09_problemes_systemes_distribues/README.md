@@ -39,6 +39,7 @@ Les fonctions réutilisables (délais aller-retour à queue lourde, détecteurs 
 
 | Notebook | Système | Contenu |
 |---|---|---|
+| [`ch09_lab_verrou_redis_et_clotures.ipynb`](ch09_lab_verrou_redis_et_clotures.ipynb) | Redis 7 (verrou et stockage), deux clients en conteneurs | bail `SET NX PX` et son expiration ; client figé par `docker pause` après avoir vérifié son bail : écriture de zombie qui écrase celle du détenteur légitime ; correction par jetons de clôture (scripts Lua atomiques côté verrou et côté stockage) ; durée de pause vue par le client |
 
 Services : [`docker/distsys/compose.yml`](../../docker/distsys/compose.yml) (projet `ddia_distsys`, ports 10901 et 10902).
 
