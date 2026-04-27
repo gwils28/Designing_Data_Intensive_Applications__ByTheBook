@@ -1,0 +1,26 @@
+# Chapitre 10 - Cohérence et consensus
+
+Le chapitre 10 précise ce que veut dire « cohérence forte » et comment l'obtenir sans sacrifier la tolérance aux pannes. Il définit la **linéarisabilité** (l'illusion d'une copie unique), montre quand elle est indispensable et ce qu'elle coûte (CAP, latence) ; il relie ensuite la cohérence à la **génération d'identifiants et d'horodatages** (horloges de Lamport, horloges hybrides, générateurs linéarisables) ; il montre enfin que verrous, unicité, journaux, compteurs et validation atomique sont des formes d'un même problème, le **consensus**, résolu en pratique par Raft, Paxos ou Zab et exposé aux applications par les **services de coordination**. Les notebooks ajoutent ce que le livre laisse de côté : un vérificateur de linéarisabilité, un registre sur quorum simulé, Paxos et Raft implémentés sur le simulateur et soumis à des pannes, un modèle de service de coordination, et un lab sur une vraie grappe etcd.
+
+Les fonctions réutilisables (historiques et vérificateur de linéarisabilité, tracé des historiques avec leurs points de linéarisation, registre sur quorum en modes Dynamo et ABD, horloges de Lamport et vectorielles, messagerie simulée et mesure des inversions causales, générateurs d'identifiants distribués, diffusion à ordre total par séquenceur, Paxos à une décision, Raft avec client et vérifications de sûreté, disponibilité et latence des quorums, modèle de service de coordination avec révisions, baux, clés éphémères et séquentielles et surveillances) sont dans [`ddia/consistency.py`](../../ddia/consistency.py), testées par [`tests/test_consistency.py`](../../tests/test_consistency.py). Les horloges logiques hybrides et l'oracle d'horodatage par lots sont dans [`ddia/consistency_clocks.py`](../../ddia/consistency_clocks.py), testés par [`tests/test_consistency_clocks.py`](../../tests/test_consistency_clocks.py).
+
+## Notebooks de cours
+
+| Notebook | Sections du livre | Contenu |
+|---|---|---|
+| [`ch10_cours_1_linearisabilite.ipynb`](ch10_cours_1_linearisabilite.ipynb) | introduction du chapitre ; *Linearizability* : *What Makes a System Linearizable?*, encadré *Linearizability Versus Serializability*, *Relying on Linearizability*, *Implementing Linearizable Systems*, *The Cost of Linearizability* (*The CAP theorem*, encadré *The Unhelpful CAP Theorem*, *Linearizability and network delays*) | cohérence à terme contre cohérence forte ; le site sportif non linéarisable (diagramme espace-temps) ; registre, intervalles et points de linéarisation ; vérificateur de linéarisabilité (Wing et Gong mémoïsé) appliqué à des historiques avec CAS ; sérialisabilité stricte (diagramme) ; verrous, unicité, course entre deux canaux (transcodeur, probabilité d'incident) ; réplications linéarisables ou non, quorums stricts non linéarisables, algorithme ABD mesuré sur 1 200 simulations et son coût ; partition entre deux sites, CP contre AP sur une journée, PACELC, latence en fonction de l'incertitude des délais |
+
+## Labs (Docker)
+
+| Notebook | Système | Contenu |
+|---|---|---|
+
+Démarrer et arrêter la grappe etcd (ports hôtes 11001 à 11003) :
+
+```bash
+docker compose -f docker/consistency/compose.yml -p ddia_consistency up -d
+docker compose -f docker/consistency/compose.yml -p ddia_consistency down -v
+```
+
+
+Les transactions distribuées et la validation à deux phases (2PC), traitées au chapitre 9 dans la 1re édition, sont au chapitre 8 dans cette édition (cours 5 et lab PostgreSQL) ; le cours 3 ci-dessus montre que la validation atomique est une forme de consensus.
