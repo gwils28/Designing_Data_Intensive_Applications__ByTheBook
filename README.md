@@ -92,7 +92,7 @@ Lancer les tests : `pytest tests/`.
 | 6 | [Réplication](notebooks/ch06_replication) | ✅ |
 | 7 | [Sharding](notebooks/ch07_sharding) | ✅ |
 | 8 | [Transactions](notebooks/ch08_transactions) | ✅ |
-| 9 | [Les problèmes des systèmes distribués](notebooks/ch09_problemes_systemes_distribues) | 🚧 |
+| 9 | [Les problèmes des systèmes distribués](notebooks/ch09_problemes_systemes_distribues) | ✅ |
 | 10 | Cohérence et consensus | 🚧 |
 | | *Partie III - Données dérivées* | |
 | 11 | Traitement par lots | 🚧 |
