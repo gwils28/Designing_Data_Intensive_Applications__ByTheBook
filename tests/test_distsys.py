@@ -276,3 +276,25 @@ def test_generateur_amnesique():
 
 
 # --- notions de la 2e édition (fonctions dédiées) -------------------------------------------
+
+def test_tcp_rupture_politiques():
+    a = ds.tcp_failure_outcomes(policy="acquittements_tcp", n_trials=500)
+    b = ds.tcp_failure_outcomes(policy="tout_renvoyer", n_trials=500)
+    c = ds.tcp_failure_outcomes(policy="identifiants", n_trials=500)
+    assert a["perdues"] > 0 and a["deux_fois"] == 0
+    assert b["perdues"] == 0 and b["deux_fois"] > 0
+    assert c == {"perdues": 0.0, "une_fois": 1.0, "deux_fois": 0.0}
+
+
+def test_cloture_repliques_sans_leader():
+    avec = ds.fenced_lww_demo(use_token=True)
+    sans = ds.fenced_lww_demo(use_token=False)
+    assert set(avec["lectures"].values()) == {"client2"}
+    assert set(sans["lectures"].values()) == {"client1"}
+
+
+def test_noeud_boiteux():
+    tour = ds.limping_node_sim(policy="tourniquet", n_requests=40_000, seed=1)
+    ejec = ds.limping_node_sim(policy="ejection", n_requests=40_000, seed=1)
+    assert np.percentile(tour["latences"][20_000:], 99) > 5 * np.percentile(ejec["latences"][30_000:], 99)
+    assert ejec["ejection"] is not None
