@@ -19,12 +19,20 @@ Les fonctions réutilisables (historiques et vérificateur de linéarisabilité,
 | Notebook | Exercices |
 |---|---|
 | [`ch10_exercices_01-05.ipynb`](ch10_exercices_01-05.ipynb) | 10.1 à 10.5 |
+| [`ch10_exercices_06-12.ipynb`](ch10_exercices_06-12.ipynb) | 10.6 à 10.12 |
 
 - **Ex. 10.1** - Linéarisable ou pas ? Quatre historiques (écritures concurrentes, CAS, écriture sans réponse, lecture longue) jugés à la main puis par le vérificateur.
 - **Ex. 10.2** - Le coût d'un vérificateur de linéarisabilité : générateur d'historiques, recherche naïve contre mémoïsée, effet de la concurrence et des historiques fautifs.
 - **Ex. 10.3** - Quorums sur 5 nœuds, délais variables et réparation synchrone : taux d'historiques non linéarisables et messages par opération (Dynamo contre ABD).
 - **Ex. 10.4** - Placer le leader d'une base linéarisable sur trois centres de données : latences par site, partition, lectures locales.
 - **Ex. 10.5** - Linéarisable, sérialisable ou les deux ? Et la course entre une notification et la réplication (formule exponentielle, simulation, correction par version).
+- **Ex. 10.6** - Horloges de Lamport et vectorielles à la main sur une trace de trois nœuds.
+- **Ex. 10.7** - Identifiants horodatés et décalage des horloges : probabilité d'inversion (loi triangulaire) démontrée et simulée.
+- **Ex. 10.8** - Taille et placement d'une grappe de consensus face aux pannes de zones : calcul exact et Monte-Carlo.
+- **Ex. 10.9** - Casser Raft : sans restriction d'élection, une écriture confirmée disparaît (10 graines).
+- **Ex. 10.10** - Régler le délai d'élection : temps sans leader selon le délai et la dispersion du réseau (courbe en U).
+- **Ex. 10.11** - Horloges logiques hybrides à la main (recul d'horloge compris) et avance bornée par le décalage des horloges.
+- **Ex. 10.12** - La photo privée : horloges de Lamport, HLC et oracle linéarisable comparés ; coût de l'attente de l'incertitude à la Spanner.
 
 ## Labs (Docker)
 
