@@ -121,3 +121,94 @@ def commit_with_manifest(store: ObjectStore, bucket: str, table: str, attempt: s
     store.put(bucket, manifest, "\n".join(written).encode())
     store.put(bucket, f"{table}/_latest", manifest.encode())
     return manifest
+
+
+def read_committed(store: ObjectStore, bucket: str, table: str) -> List[bytes]:
+    """Lit la dernière version publiée : pointeur -> manifeste -> fichiers listés."""
+    try:
+        manifest = store.get(bucket, f"{table}/_latest").decode()
+    except KeyError:
+        return []
+    keys = store.get(bucket, manifest).decode().split("\n")
+    return [store.get(bucket, k) for k in keys if k]
+
+
+# =====================================================================================
+# Allocation de ressources
+# =====================================================================================
+
+def simulate_cluster(jobs: Sequence[Dict[str, Any]], cores: int, policy: str = "fifo",
+                     dt: float = 1.0, t_max: float = 10_000) -> Dict[str, Any]:
+    """Cluster de `cores` cœurs identiques ; chaque job = {name, arrival, tasks, duration}
+    (des tâches d'un cœur, toutes de même durée).
+
+    Politiques :
+    - "fifo" : le job arrivé le premier prend tout ce qu'il peut, les suivants le reste ;
+    - "fair" : à chaque libération, le cœur va au job actif qui en occupe le moins ;
+    - "gang" : FIFO, mais un job marqué `gang=True` ne démarre que si **toutes** ses
+      tâches peuvent tourner ensemble ; en attendant, les cœurs qui se libèrent lui sont
+      réservés (les jobs suivants ne le doublent pas).
+
+    Renvoie l'occupation au cours du temps (par job) et les dates de fin.
+    """
+    state = {j["name"]: dict(j, left=j["tasks"], running=0, end=None) for j in jobs}
+    events: List[Tuple[float, str]] = []     # (fin de tâche, job)
+    t = 0.0
+    timeline = []
+    free = cores
+    while t <= t_max:
+        while events and events[0][0] <= t + 1e-9:
+            _, name = heapq.heappop(events)
+            state[name]["running"] -= 1
+            free += 1
+            if state[name]["left"] == 0 and state[name]["running"] == 0:
+                state[name]["end"] = t
+        active = [s for s in state.values() if s["arrival"] <= t + 1e-9 and s["left"] > 0]
+        active.sort(key=lambda s: (s["arrival"], s["name"]))
+        if policy == "fifo":
+            for s in active:
+                n = min(free, s["left"])
+                for _ in range(n):
+                    heapq.heappush(events, (t + s["duration"], s["name"]))
+                s["left"] -= n
+                s["running"] += n
+                free -= n
+        elif policy == "fair":
+            while free > 0:
+                cand = [s for s in active if s["left"] > 0]
+                if not cand:
+                    break
+                s = min(cand, key=lambda s: (s["running"], s["arrival"]))
+                heapq.heappush(events, (t + s["duration"], s["name"]))
+                s["left"] -= 1
+                s["running"] += 1
+                free -= 1
+        elif policy == "gang":
+            for s in active:
+                if not s.get("gang", False):
+                    n = min(free, s["left"])
+                    for _ in range(n):
+                        heapq.heappush(events, (t + s["duration"], s["name"]))
+                    s["left"] -= n
+                    s["running"] += n
+                    free -= n
+                    continue
+                if s["running"] > 0:
+                    continue
+                if s["tasks"] > cores:
+                    raise ValueError(f"{s['name']} demande plus de cœurs que le cluster")
+                if s["left"] <= free:
+                    for _ in range(s["left"]):
+                        heapq.heappush(events, (t + s["duration"], s["name"]))
+                    s["running"] += s["left"]
+                    free -= s["left"]
+                    s["left"] = 0
+                else:
+                    break                      # réservation : les cœurs libres attendent ce job
+        else:
+            raise ValueError(policy)
+        timeline.append({"t": t, **{name: s["running"] for name, s in state.items()}})
+        if all(s["end"] is not None for s in state.values()):
+            break
+        t += dt
+    return {"timeline": timeline, "end": {n: s["end"] for n, s in state.items()}}
