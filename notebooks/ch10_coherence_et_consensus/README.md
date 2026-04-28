@@ -14,6 +14,18 @@ Les fonctions réutilisables (historiques et vérificateur de linéarisabilité,
 | [`ch10_cours_4_raft.ipynb`](ch10_cours_4_raft.ipynb) | *Consensus in Practice* : *From single-leader replication to consensus*, *Subtleties of consensus* (encadré *Consistency Versus Availability in Leader Election*), *Pros and cons of consensus* | de la réplication à leader unique au consensus ; mandats et quorums qui se recoupent (diagramme) ; Raft implémenté sur le simulateur : élection (diagramme espace-temps), frise des mandats, réplication du journal et validation à la majorité ; partition et leader isolé (journaux avant et après) ; lectures locales non linéarisables contre lectures par le journal ; restriction d'élection ; élection non propre ; latence et messages selon la taille, délais d'élection et élections inutiles, lien défaillant, pré-vote |
 | [`ch10_cours_5_services_de_coordination.ipynb`](ch10_cours_5_services_de_coordination.ipynb) | *Coordination Services* : *Locks and leases*, *Support for fencing*, *Failure detection*, *Change notifications*, encadré *Managing Configuration with Coordination Services*, *Allocating work to nodes*, *Service discovery* | architecture d'un service de coordination (diagramme) ; verrou, bail expiré pendant une pause et jeton de clôture (diagramme espace-temps) ; durée des sessions : fausses expirations contre détection ; élection par clés éphémères séquentielles, effet de troupeau ; répartition du travail et réattribution après une panne ; pourquoi un petit ensemble fixe ; découverte de services, caches et observateurs |
 
+## Notebooks d'exercices
+
+| Notebook | Exercices |
+|---|---|
+| [`ch10_exercices_01-05.ipynb`](ch10_exercices_01-05.ipynb) | 10.1 à 10.5 |
+
+- **Ex. 10.1** - Linéarisable ou pas ? Quatre historiques (écritures concurrentes, CAS, écriture sans réponse, lecture longue) jugés à la main puis par le vérificateur.
+- **Ex. 10.2** - Le coût d'un vérificateur de linéarisabilité : générateur d'historiques, recherche naïve contre mémoïsée, effet de la concurrence et des historiques fautifs.
+- **Ex. 10.3** - Quorums sur 5 nœuds, délais variables et réparation synchrone : taux d'historiques non linéarisables et messages par opération (Dynamo contre ABD).
+- **Ex. 10.4** - Placer le leader d'une base linéarisable sur trois centres de données : latences par site, partition, lectures locales.
+- **Ex. 10.5** - Linéarisable, sérialisable ou les deux ? Et la course entre une notification et la réplication (formule exponentielle, simulation, correction par version).
+
 ## Labs (Docker)
 
 | Notebook | Système | Contenu |
