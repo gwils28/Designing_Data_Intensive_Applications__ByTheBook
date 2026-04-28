@@ -212,3 +212,170 @@ def simulate_cluster(jobs: Sequence[Dict[str, Any]], cores: int, policy: str = "
             break
         t += dt
     return {"timeline": timeline, "end": {n: s["end"] for n, s in state.items()}}
+
+
+def drf(capacity: Sequence[float], demands: Dict[str, Sequence[float]],
+        max_tasks: Optional[Dict[str, int]] = None) -> Dict[str, Any]:
+    """Dominant resource fairness par remplissage progressif (Ghodsi et al., 2011).
+
+    `capacity` : quantité de chaque ressource (ex. [cœurs, Go de mémoire]) ;
+    `demands[u]` : besoin d'une tâche de l'utilisateur u. À chaque pas, on donne une
+    tâche à l'utilisateur dont la **part dominante** (max sur les ressources de sa part
+    consommée) est la plus faible, tant que ses besoins tiennent dans le reste.
+    """
+    cap = np.asarray(capacity, dtype=float)
+    used = np.zeros_like(cap)
+    tasks = {u: 0 for u in demands}
+    dem = {u: np.asarray(d, dtype=float) for u, d in demands.items()}
+    blocked = set()
+    while len(blocked) < len(demands):
+        shares = {u: float(np.max(tasks[u] * dem[u] / cap)) for u in demands if u not in blocked}
+        u = min(shares, key=lambda x: (shares[x], x))
+        if np.all(used + dem[u] <= cap + 1e-9) and (max_tasks is None or tasks[u] < max_tasks.get(u, 10 ** 9)):
+            used += dem[u]
+            tasks[u] += 1
+        else:
+            blocked.add(u)
+    dominant = {u: float(np.max(tasks[u] * dem[u] / cap)) for u in demands}
+    return {"tasks": tasks, "dominant_share": dominant, "used": used, "utilisation": used / cap}
+
+
+# =====================================================================================
+# DataFrame paresseux
+# =====================================================================================
+
+def make_table(n_rows: int, row_group: int = 10_000, seed: int = 0) -> List[Dict[str, np.ndarray]]:
+    """Table de ventes en groupes de lignes (colonnes numpy), triée par date comme le serait
+    un fichier écrit au fil de l'eau : colonnes day, store, product, qty, price."""
+    rng = np.random.default_rng(seed)
+    day = np.sort(rng.integers(0, 365, n_rows))
+    cols = {"day": day, "store": rng.integers(0, 50, n_rows), "product": rng.integers(0, 2000, n_rows),
+            "qty": rng.integers(1, 6, n_rows), "price": rng.gamma(2.0, 15.0, n_rows).round(2)}
+    return [{c: v[i:i + row_group] for c, v in cols.items()} for i in range(0, n_rows, row_group)]
+
+
+@dataclass
+class _Scan:
+    columns: Optional[List[str]] = None
+    predicates: List[Tuple[str, str, float]] = field(default_factory=list)
+
+
+_OPS = {"<": np.less, "<=": np.less_equal, ">": np.greater, ">=": np.greater_equal, "==": np.equal}
+
+
+class LazyFrame:
+    """DataFrame paresseux : `filter`, `select`, `with_column`, `group_sum` empilent des
+    opérations ; `explain(optimize)` montre le plan, `collect(optimize)` l'exécute.
+
+    Optimisations (si `optimize=True`) : poussée des filtres simples (colonne, op,
+    constante) dans la lecture, qui saute les groupes de lignes dont les statistiques
+    min/max excluent toute ligne ; élagage des colonnes inutiles.
+    Les compteurs `rows_read`, `values_read`, `groups_skipped` mesurent le travail.
+    """
+
+    def __init__(self, groups: List[Dict[str, np.ndarray]], ops: Optional[List[Tuple]] = None):
+        self.groups = groups
+        self.ops = ops or []
+        self.stats: Dict[str, int] = {}
+
+    def _with(self, op: Tuple) -> "LazyFrame":
+        return LazyFrame(self.groups, self.ops + [op])
+
+    def filter(self, col: str, op: str, value: float) -> "LazyFrame":
+        return self._with(("filter", col, op, value))
+
+    def with_column(self, name: str, fn: Callable[[Dict[str, np.ndarray]], np.ndarray], uses: Sequence[str]) -> "LazyFrame":
+        return self._with(("with_column", name, fn, list(uses)))
+
+    def select(self, *cols: str) -> "LazyFrame":
+        return self._with(("select", list(cols)))
+
+    def group_sum(self, key: str, value: str) -> "LazyFrame":
+        return self._with(("group_sum", key, value))
+
+    def _plan(self, optimize: bool) -> Tuple[_Scan, List[Tuple]]:
+        scan, rest = _Scan(), []
+        if not optimize:
+            return scan, list(self.ops)
+        defined = set()
+        for op in self.ops:
+            if op[0] == "filter" and op[1] not in defined:
+                scan.predicates.append(op[1:])
+            else:
+                if op[0] == "with_column":
+                    defined.add(op[1])
+                rest.append(op)
+        needed: set = set(p[0] for p in scan.predicates)
+        for op in rest:
+            if op[0] == "filter":
+                needed.add(op[1])
+            elif op[0] == "with_column":
+                needed.update(op[3])
+            elif op[0] == "select":
+                needed.update(c for c in op[1] if c not in defined)
+            elif op[0] == "group_sum":
+                needed.update(c for c in (op[1], op[2]) if c not in defined)
+        scan.columns = sorted(needed - defined)
+        return scan, rest
+
+    def explain(self, optimize: bool = True) -> str:
+        scan, rest = self._plan(optimize)
+        cols = "toutes" if scan.columns is None else ", ".join(scan.columns)
+        preds = " ET ".join(f"{c} {o} {v}" for c, o, v in scan.predicates) or "aucun"
+        lines = [f"LECTURE colonnes=[{cols}] filtres poussés=[{preds}]"]
+        for op in rest:
+            if op[0] == "filter":
+                lines.append(f"FILTRE {op[1]} {op[2]} {op[3]}")
+            elif op[0] == "with_column":
+                lines.append(f"CALCUL {op[1]} := f({', '.join(op[3])})")
+            elif op[0] == "select":
+                lines.append(f"PROJECTION {', '.join(op[1])}")
+            elif op[0] == "group_sum":
+                lines.append(f"AGRÉGAT somme({op[2]}) par {op[1]}")
+        return "\n".join(lines[::-1])
+
+    def collect(self, optimize: bool = True):
+        scan, rest = self._plan(optimize)
+        st = {"groups_skipped": 0, "rows_read": 0, "values_read": 0}
+        parts = []
+        for g in self.groups:
+            n = len(next(iter(g.values())))
+            skip = False
+            for c, o, v in scan.predicates:
+                lo, hi = g[c].min(), g[c].max()
+                if (o in ("<", "<=") and not _OPS[o](lo, v)) or (o in (">", ">=") and not _OPS[o](hi, v)) \
+                        or (o == "==" and not (lo <= v <= hi)):
+                    skip = True
+            if skip:
+                st["groups_skipped"] += 1
+                continue
+            cols = scan.columns if scan.columns is not None else list(g)
+            data = {c: g[c] for c in cols}
+            st["rows_read"] += n
+            st["values_read"] += n * len(cols)
+            mask = np.ones(n, dtype=bool)
+            for c, o, v in scan.predicates:
+                mask &= _OPS[o](data[c], v)
+            parts.append({c: a[mask] for c, a in data.items()})
+        data = {c: np.concatenate([p[c] for p in parts]) if parts else np.array([]) for c in (parts[0] if parts else {})}
+        result: Any = data
+        for op in rest:
+            if op[0] == "filter":
+                m = _OPS[op[2]](result[op[1]], op[3])
+                result = {c: a[m] for c, a in result.items()}
+            elif op[0] == "with_column":
+                result = dict(result)
+                result[op[1]] = op[2](result)
+            elif op[0] == "select":
+                result = {c: result[c] for c in op[1]}
+            elif op[0] == "group_sum":
+                keys, inv = np.unique(result[op[1]], return_inverse=True)
+                sums = np.bincount(inv, weights=result[op[2]])
+                result = {op[1]: keys, op[2]: sums}
+        self.stats = st
+        return result
+
+
+# =====================================================================================
+# Quasi-doublons : MinHash et LSH
+# =====================================================================================
