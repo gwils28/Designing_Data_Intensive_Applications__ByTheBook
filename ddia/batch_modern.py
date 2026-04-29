@@ -379,3 +379,47 @@ class LazyFrame:
 # =====================================================================================
 # Quasi-doublons : MinHash et LSH
 # =====================================================================================
+
+def shingles(text: str, k: int = 5) -> set:
+    """Ensemble des k-grammes de mots (après normalisation)."""
+    words = re.findall(r"\w+", text.lower())
+    if len(words) < k:
+        return {" ".join(words)}
+    return {" ".join(words[i:i + k]) for i in range(len(words) - k + 1)}
+
+
+def jaccard(a: set, b: set) -> float:
+    return len(a & b) / len(a | b) if a or b else 1.0
+
+
+_PRIME = (1 << 61) - 1
+
+
+def minhash(sh: Iterable[str], num_perm: int = 128, seed: int = 0) -> np.ndarray:
+    """Signature MinHash : pour chacune de `num_perm` fonctions de hachage h(x) = a x + b
+    mod p, le minimum sur les éléments de l'ensemble. P(égalité d'une composante) = Jaccard."""
+    rng = np.random.default_rng(seed)
+    a = rng.integers(1, _PRIME, num_perm, dtype=np.uint64).astype(object)
+    b = rng.integers(0, _PRIME, num_perm, dtype=np.uint64).astype(object)
+    hs = [zlib.crc32(s.encode()) for s in sh]
+    sig = np.full(num_perm, _PRIME, dtype=object)
+    for h in hs:
+        sig = np.minimum(sig, (a * h + b) % _PRIME)
+    return sig.astype(np.uint64)
+
+
+def lsh_candidates(signatures: Dict[Any, np.ndarray], bands: int) -> set:
+    """Paires candidates : deux documents dont au moins une bande (tranche de r lignes de
+    la signature) est identique. Proba d'être candidat : 1 - (1 - J^r)^b."""
+    any_sig = next(iter(signatures.values()))
+    r = len(any_sig) // bands
+    cands = set()
+    for bnd in range(bands):
+        buckets = defaultdict(list)
+        for d, s in signatures.items():
+            buckets[tuple(s[bnd * r:(bnd + 1) * r].tolist())].append(d)
+        for ds in buckets.values():
+            for i in range(len(ds)):
+                for j in range(i + 1, len(ds)):
+                    cands.add((min(ds[i], ds[j]), max(ds[i], ds[j])))
+    return cands
