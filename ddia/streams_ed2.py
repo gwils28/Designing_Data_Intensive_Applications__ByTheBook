@@ -127,3 +127,58 @@ def outbox_vs_dual(n_orders: int, crash_prob: float, mode: str, seed: int = 0) -
     distinct = set(published)
     return {"committed": committed, "published": len(distinct),
             "missing": committed - len(distinct), "duplicates": len(published) - len(distinct)}
+
+
+def _keystream(key: bytes, nonce: bytes, n: int) -> bytes:
+    out = bytearray()
+    ctr = 0
+    while len(out) < n:
+        out += hashlib.sha256(key + nonce + ctr.to_bytes(8, "big")).digest()
+        ctr += 1
+    return bytes(out[:n])
+
+
+class CryptoShredder:
+    """Effacement cryptographique : chaque sujet (par exemple un utilisateur) a sa clé ;
+    ses données sont chiffrées avant d'entrer dans le journal immuable. Oublier la clé
+    rend toutes les copies (journal, sauvegardes, répliques) illisibles."""
+
+    def __init__(self, seed: int = 0):
+        self.keys: Dict[Any, bytes] = {}
+        self._rng = random.Random(seed)
+
+    def _key(self, subject) -> bytes:
+        if subject not in self.keys:
+            self.keys[subject] = self._rng.getrandbits(256).to_bytes(32, "big")
+        return self.keys[subject]
+
+    def encrypt(self, subject, plaintext: str) -> Tuple[Any, bytes, bytes]:
+        key = self._key(subject)
+        nonce = self._rng.getrandbits(96).to_bytes(12, "big")
+        data = plaintext.encode()
+        ct = bytes(a ^ b for a, b in zip(data, _keystream(key, nonce, len(data))))
+        return subject, nonce, ct
+
+    def decrypt(self, record: Tuple[Any, bytes, bytes]) -> Optional[str]:
+        subject, nonce, ct = record
+        key = self.keys.get(subject)
+        if key is None:
+            return None
+        return bytes(a ^ b for a, b in zip(ct, _keystream(key, nonce, len(ct)))).decode()
+
+    def shred(self, subject) -> None:
+        self.keys.pop(subject, None)
+
+
+def tiered_storage_cost(write_mb_s: float, retention_days: float, local_hours: float,
+                        replication: int = 3, disk_eur_gb_month: float = 0.08,
+                        object_eur_gb_month: float = 0.02) -> Dict[str, float]:
+    """Coût mensuel du stockage d'un journal : tout sur disques locaux répliqués, ou
+    seulement les `local_hours` dernières heures en local et le reste en stockage objet
+    (déjà redondant, donc sans facteur de réplication). Prix indicatifs en euros."""
+    gb_per_day = write_mb_s * 86400 / 1024
+    total_gb = gb_per_day * retention_days
+    local_gb = gb_per_day * min(retention_days, local_hours / 24)
+    all_local = total_gb * replication * disk_eur_gb_month
+    tiered = local_gb * replication * disk_eur_gb_month + total_gb * object_eur_gb_month
+    return {"total_gb": total_gb, "all_local_eur": all_local, "tiered_eur": tiered}
