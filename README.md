@@ -95,7 +95,7 @@ Lancer les tests : `pytest tests/`.
 | 9 | [Les problèmes des systèmes distribués](notebooks/ch09_problemes_systemes_distribues) | ✅ |
 | 10 | [Cohérence et consensus](notebooks/ch10_coherence_et_consensus) | ✅ |
 | | *Partie III - Données dérivées* | |
-| 11 | [Traitement par lots](notebooks/ch11_traitement_par_lots) | 🚧 |
+| 11 | [Traitement par lots](notebooks/ch11_traitement_par_lots) | ✅ |
 | 12 | Traitement de flux | 🚧 |
 | 13 | Une philosophie des systèmes de streaming | 🚧 |
 | 14 | Faire ce qui est juste | 🚧 |
