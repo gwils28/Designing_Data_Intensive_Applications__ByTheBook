@@ -38,6 +38,7 @@ Les fonctions réutilisables (journaux synthétiques, pipeline Unix via `subproc
 
 | Notebook | Contenu |
 |---|---|
+| [`ch11_lab_postgres_lots.ipynb`](ch11_lab_postgres_lots.ipynb) | PostgreSQL 16 comme moteur de lots : tri externe selon `work_mem` (aussi rapide, voire plus, que le tri en mémoire), agrégation par hachage qui déborde en partitions, Hash Join, Merge Join et Nested Loop forcés, jointure par hachage partitionnée (Batches), chargement ligne à ligne, `executemany` et `COPY`, publication en place contre bascule par `RENAME` transactionnel observée par un lecteur concurrent |
 
 Démarrage et arrêt (depuis la racine du dépôt) :
 
