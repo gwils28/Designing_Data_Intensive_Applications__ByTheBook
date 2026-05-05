@@ -19,12 +19,20 @@ Les fonctions réutilisables (journaux synthétiques, pipeline Unix via `subproc
 | Notebook | Exercices |
 |---|---|
 | [`ch11_exercices_01-05.ipynb`](ch11_exercices_01-05.ipynb) | 11.1 à 11.5 |
+| [`ch11_exercices_06-12.ipynb`](ch11_exercices_06-12.ipynb) | 11.6 à 11.12 |
 
 - **Ex. 11.1** - Table de hachage ou tri : ordres de grandeur d'une agrégation de 2 To, tri externe en une passe, vérification du coût en log(N/M).
 - **Ex. 11.2** - Régler la largeur de fusion d'un tri externe : passes contre accès disque, disque dur et SSD.
 - **Ex. 11.3** - Dimensionner un DFS : mémoire des métadonnées et petits fichiers, réplication contre RS(6, 3), trafic de réparation.
 - **Ex. 11.4** - Préemption et granularité des tâches : surcoût 1 + o/T + λT/2, optimum √(2o/λ), effet des vagues et du maximum (simulation).
 - **Ex. 11.5** - Le combineur : réduction du shuffle, et pourquoi une moyenne ne peut pas servir de combineur (somme, effectif).
+- **Ex. 11.6** - Une jointure tri-fusion qui ne produit rien : clé de tri, de partitionnement et de regroupement ; jointure interne ou externe.
+- **Ex. 11.7** - Choisir l'algorithme de jointure pour quatre cas (diffusion, shuffle, hachage partitionné), seuil G/(W-1).
+- **Ex. 11.8** - Une célébrité dans la jointure : charge ×11, salage, plancher du hachage (simulation).
+- **Ex. 11.9** - Plus courts chemins en Pregel sur un réseau routier, vérification par Dijkstra, vague de messages.
+- **Ex. 11.10** - Écrire dans la base de production ou construire et basculer : durées, états mélangés après échec, idempotence.
+- **Ex. 11.11** - Allouer un cluster partagé : partage des cœurs irréalisable, DRF à trois ressources, interblocage du gang scheduling.
+- **Ex. 11.12** - Publier une sortie sur un magasin d'objets : renommage interrompu, tâches spéculatives, protocole par manifeste testé panne par panne.
 
 ## Lab (Docker)
 
