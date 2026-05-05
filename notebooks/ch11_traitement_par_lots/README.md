@@ -14,6 +14,18 @@ Les fonctions réutilisables (journaux synthétiques, pipeline Unix via `subproc
 | [`ch11_cours_4_moteurs_dataflow.ipynb`](ch11_cours_4_moteurs_dataflow.ipynb) | *Dataflow Engines* ; *Handling faults* ; *Query Languages* (encadré *Batch Processing and Cloud Data Warehouses Converge*) ; *DataFrames* ; Pregel (*Machine Learning*) | barrières contre pipeline (simulation avec traînards) ; moteur dataflow `Dataset` : plan en étapes (diagramme), fusion, comparaison avec un job par opérateur ; recalcul d'une partition perdue par lignage, non-déterminisme démontré, intervalle de sauvegarde de Young ; Pregel (diagramme des super-étapes), PageRank et composantes connexes ; SQL sur SQLite, ordre des jointures, exécution vectorisée ; DataFrame paresseux avec poussée des filtres et des projections |
 | [`ch11_cours_5_sorties_et_usages.ipynb`](ch11_cours_5_sorties_et_usages.ipynb) | introduction du chapitre (sorties immuables) ; *Batch Use Cases* : *Extract-Transform-Load*, *Analytics*, *Machine Learning*, *Serving Derived Data* | sorties versionnées et retour arrière par pointeur contre mise à jour en place (diagramme) ; index inversé construit par MapReduce ; écrire dans la base de production (surcharge M/M/1, doublons après relance) contre fichier trié et publication atomique ; ETL avec rebut, cube préparé contre requêtes ad hoc ; déduplication de corpus par MinHash et LSH ; publication via un flux et visibilité tout ou rien |
 
+## Notebooks d'exercices
+
+| Notebook | Exercices |
+|---|---|
+| [`ch11_exercices_01-05.ipynb`](ch11_exercices_01-05.ipynb) | 11.1 à 11.5 |
+
+- **Ex. 11.1** - Table de hachage ou tri : ordres de grandeur d'une agrégation de 2 To, tri externe en une passe, vérification du coût en log(N/M).
+- **Ex. 11.2** - Régler la largeur de fusion d'un tri externe : passes contre accès disque, disque dur et SSD.
+- **Ex. 11.3** - Dimensionner un DFS : mémoire des métadonnées et petits fichiers, réplication contre RS(6, 3), trafic de réparation.
+- **Ex. 11.4** - Préemption et granularité des tâches : surcoût 1 + o/T + λT/2, optimum √(2o/λ), effet des vagues et du maximum (simulation).
+- **Ex. 11.5** - Le combineur : réduction du shuffle, et pourquoi une moyenne ne peut pas servir de combineur (somme, effectif).
+
 ## Lab (Docker)
 
 | Notebook | Contenu |
