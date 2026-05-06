@@ -16,6 +16,19 @@ Les fonctions réutilisables (politiques de débordement, file partagée avec re
 | [`ch12_cours_6_raisonner_sur_le_temps.ipynb`](ch12_cours_6_raisonner_sur_le_temps.ipynb) | *Reasoning About Time* : *Event time versus processing time*, *Handling straggler events*, *Whose clock are you using, anyway?*, *Types of windows* | faux pic dû au temps de traitement après un redéploiement ; filigrane : compromis fraîcheur, complétude, mémoire et corrections ; filigrane de plusieurs producteurs (diagramme espace-temps) ; correction des horloges d'appareils par trois horodatages ; quatre types de fenêtres visualisés, taille de l'état |
 | [`ch12_cours_7_jointures_et_tolerance_aux_pannes.ipynb`](ch12_cours_7_jointures_et_tolerance_aux_pannes.ipynb) | *Stream Joins* (*Stream-stream join*, *Stream-table join*, *Table-table join*, *Time dependence of joins*) ; *Fault Tolerance* (*Microbatching and checkpointing*, *Atomic commit revisited*, *Idempotence*, *Rebuilding state after a failure*) | recherches et clics : fenêtre contre exactitude et état ; enrichissement par copie locale (diagramme) ; timelines matérialisées vérifiées contre SQL (règle du produit) ; jointure non déterministe et dimensions à évolution lente ; micro-lots, checkpoints par barrières (diagramme espace-temps), formule de Young ; quatre sémantiques sous pannes ; idempotence et fencing d'un zombie (diagramme espace-temps) ; reconstruction de l'état |
 
+## Notebooks d'exercices
+
+| Notebook | Exercices |
+|---|---|
+| [`ch12_exercices_01-06.ipynb`](ch12_exercices_01-06.ipynb) | 12.1 à 12.6 |
+
+- **Ex. 12.1** - Sondage contre notification : charge, requêtes vides, délai, seuil λT = 1 (calcul et simulation).
+- **Ex. 12.2** - Dimensionner les partitions d'un sujet, partition la plus chargée avec des clés Zipf, clés déplacées par un changement du nombre de partitions.
+- **Ex. 12.3** - Rétention d'un cluster répliqué, consommateur arrêté un week-end, durée du rattrapage (calcul et simulation).
+- **Ex. 12.4** - Fréquence de validation des offsets, doublons par jour, effets externes.
+- **Ex. 12.5** - Trouver l'anomalie d'un cache invalidé par double écriture (diagramme espace-temps, simulation) et la corriger par CDC et versions.
+- **Ex. 12.6** - Taille d'un sujet compacté : seuil de saleté, amplification d'espace, pierres tombales (calcul et mini-lab).
+
 ## Labs (Docker)
 
 Les deux labs partagent le fichier [`docker/streams/compose.yml`](../../docker/streams/compose.yml) (projet `ddia_streams`, Kafka sur le port 11292, PostgreSQL sur le port 11232) :
