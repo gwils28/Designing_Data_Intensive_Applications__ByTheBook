@@ -111,7 +111,7 @@ Lancer les tests : `pytest tests/`.
 - [Chapitre 8 - Lab : niveaux d'isolation réels de PostgreSQL](notebooks/ch08_transactions/ch08_lab_isolation_postgresql.ipynb)
 - [Chapitre 9 - Lab : verrou Redis, pause de processus et jetons de clôture](notebooks/ch09_problemes_systemes_distribues/ch09_lab_verrou_redis_et_clotures.ipynb)
 - [Chapitre 10 - Lab : consensus et coordination avec etcd](notebooks/ch10_coherence_et_consensus/ch10_lab_etcd.ipynb)
-- [Chapitre 11 - Lab : capture des changements avec le décodage logique de PostgreSQL](notebooks/ch11_traitement_de_flux/ch11_lab_cdc_postgresql.ipynb)
 - [Chapitre 11 - Lab : un journal partitionné réel avec Kafka](notebooks/ch11_traitement_de_flux/ch11_lab_kafka.ipynb)
 - [Chapitre 11 - Lab : les algorithmes du traitement par lots dans PostgreSQL](notebooks/ch11_traitement_par_lots/ch11_lab_postgres_lots.ipynb)
 - [Chapitre 12 - Lab : dégrouper la base avec PostgreSQL et Redis](notebooks/ch12_avenir_des_systemes_de_donnees/ch12_lab_degroupage_postgresql.ipynb)
+- [Chapitre 12 - Lab : capture des changements avec le décodage logique de PostgreSQL](notebooks/ch12_traitement_de_flux/ch12_lab_cdc_postgresql.ipynb)

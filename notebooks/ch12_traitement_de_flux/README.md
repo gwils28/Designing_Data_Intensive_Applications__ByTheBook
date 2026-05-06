@@ -47,3 +47,4 @@ docker compose -f docker/streams/compose.yml -p ddia_streams down -v
 
 | Notebook | Contenu |
 |---|---|
+| [`ch12_lab_cdc_postgresql.ipynb`](ch12_lab_cdc_postgresql.ipynb) | PostgreSQL 16, décodage logique (`test_decoding`) : slot de réplication et LSN, ordre des validations, `REPLICA IDENTITY`, index dérivé contre double écriture concurrente, instantané initial raccordé par l'instantané MVCC, WAL retenu par un slot non consommé |
