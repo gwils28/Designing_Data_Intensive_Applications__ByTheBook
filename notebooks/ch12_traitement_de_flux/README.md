@@ -47,4 +47,5 @@ docker compose -f docker/streams/compose.yml -p ddia_streams down -v
 
 | Notebook | Contenu |
 |---|---|
+| [`ch12_lab_kafka.ipynb`](ch12_lab_kafka.ipynb) | Kafka 3.7 : partitions attribuées par murmur2 (identiques à `st.kafka_partition`), groupes de consommateurs et rééquilibrage, membres inactifs, offsets validés et doublons après une panne, retard par partition, rejeu (début, offset, instant), rétention, compaction et reconstruction de l'état |
 | [`ch12_lab_cdc_postgresql.ipynb`](ch12_lab_cdc_postgresql.ipynb) | PostgreSQL 16, décodage logique (`test_decoding`) : slot de réplication et LSN, ordre des validations, `REPLICA IDENTITY`, index dérivé contre double écriture concurrente, instantané initial raccordé par l'instantané MVCC, WAL retenu par un slot non consommé |
