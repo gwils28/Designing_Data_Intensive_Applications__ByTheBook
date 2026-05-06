@@ -96,7 +96,7 @@ Lancer les tests : `pytest tests/`.
 | 10 | [Cohérence et consensus](notebooks/ch10_coherence_et_consensus) | ✅ |
 | | *Partie III - Données dérivées* | |
 | 11 | [Traitement par lots](notebooks/ch11_traitement_par_lots) | ✅ |
-| 12 | Traitement de flux | 🚧 |
+| 12 | [Traitement de flux](notebooks/ch12_traitement_de_flux) | 🚧 |
 | 13 | Une philosophie des systèmes de streaming | 🚧 |
 | 14 | Faire ce qui est juste | 🚧 |
 

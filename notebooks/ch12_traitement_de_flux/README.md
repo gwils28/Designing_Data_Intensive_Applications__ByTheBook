@@ -1,0 +1,23 @@
+# Chapitre 12 - Traitement de flux
+
+Le chapitre 12 passe des entrées bornées du traitement par lots aux **flux** d'événements, qui ne se terminent jamais. Il compare les deux grandes familles de courtiers de messages (files de style AMQP/JMS et journaux partitionnés), montre qu'une base de données est elle-même une source de flux (capture des changements, event sourcing, dualité entre état et journal immuable), puis étudie le traitement des flux : usages, raisonnement sur le temps (temps de l'événement, filigranes, fenêtres), jointures et tolérance aux pannes. Les notebooks ajoutent ce que le livre laisse de côté : un journal partitionné implémenté avec le partitionneur exact de Kafka, des simulations de pannes, de courses et de retards, des mesures (HyperLogLog, vues incrémentales, percolateur), et deux labs sur de vrais systèmes.
+
+Les fonctions réutilisables (politiques de débordement, file partagée avec relivraison, blocage en tête de file, partitionneur murmur2 de Kafka, journal partitionné avec segments, rétention, compaction et offsets de groupes, commits d'offsets avec pannes, double écriture contre CDC, CDC par déclencheurs sur SQLite et index plein texte dérivé, magasin d'événements à contrôle optimiste, détection de motifs, HyperLogLog, percolateur, fenêtres fixes, par sauts, glissantes et de session, compteur à filigrane, jointures flux-flux, flux-table et table-table, job à état avec quatre sémantiques de livraison, puits avec fencing, formule de Young) sont dans [`ddia/streams.py`](../../ddia/streams.py), testées par [`tests/test_streams.py`](../../tests/test_streams.py). Les compléments propres à la 2e édition (files de lettres mortes, boîte d'envoi, effacement cryptographique, coût du stockage hiérarchisé) sont dans [`ddia/streams_ed2.py`](../../ddia/streams_ed2.py), testés par [`tests/test_streams_ed2.py`](../../tests/test_streams_ed2.py).
+
+## Notebooks de cours
+
+| Notebook | Sections du livre | Contenu |
+|---|---|---|
+| [`ch12_cours_1_courtiers_de_messages.ipynb`](ch12_cours_1_courtiers_de_messages.ipynb) | *Transmitting Event Streams* : *Messaging Systems* (*Direct messaging from producers to consumers*, *Message brokers*, *Message brokers compared to databases*, *Multiple consumers*, *Acknowledgments and redelivery*) | événements, producteurs, consommateurs ; coût du sondage contre notification ; perte, tampon ou contre-pression face à un pic (simulation) ; messagerie directe et compteurs faussés par les pertes UDP ; courtier de messages (diagramme) et comparaison avec une base ; répartition de charge, diffusion et groupes (diagramme) ; acquittements, relivraison et réordonnancement (diagramme espace-temps, inversions mesurées) ; messages empoisonnés et files de lettres mortes |
+
+## Labs (Docker)
+
+Les deux labs partagent le fichier [`docker/streams/compose.yml`](../../docker/streams/compose.yml) (projet `ddia_streams`, Kafka sur le port 11292, PostgreSQL sur le port 11232) :
+
+```bash
+docker compose -f docker/streams/compose.yml -p ddia_streams up -d --wait
+docker compose -f docker/streams/compose.yml -p ddia_streams down -v
+```
+
+| Notebook | Contenu |
+|---|---|
