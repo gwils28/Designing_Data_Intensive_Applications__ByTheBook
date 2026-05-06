@@ -21,6 +21,7 @@ Les fonctions réutilisables (politiques de débordement, file partagée avec re
 | Notebook | Exercices |
 |---|---|
 | [`ch12_exercices_01-06.ipynb`](ch12_exercices_01-06.ipynb) | 12.1 à 12.6 |
+| [`ch12_exercices_07-12.ipynb`](ch12_exercices_07-12.ipynb) | 12.7 à 12.12 |
 
 - **Ex. 12.1** - Sondage contre notification : charge, requêtes vides, délai, seuil λT = 1 (calcul et simulation).
 - **Ex. 12.2** - Dimensionner les partitions d'un sujet, partition la plus chargée avec des clés Zipf, clés déplacées par un changement du nombre de partitions.
@@ -28,6 +29,12 @@ Les fonctions réutilisables (politiques de débordement, file partagée avec re
 - **Ex. 12.4** - Fréquence de validation des offsets, doublons par jour, effets externes.
 - **Ex. 12.5** - Trouver l'anomalie d'un cache invalidé par double écriture (diagramme espace-temps, simulation) et la corriger par CDC et versions.
 - **Ex. 12.6** - Taille d'un sujet compacté : seuil de saleté, amplification d'espace, pierres tombales (calcul et mini-lab).
+- **Ex. 12.7** - Compte bancaire en event sourcing : écriture biaisée sans contrôle de version, instantanés, nouvelle projection.
+- **Ex. 12.8** - Fenêtres fixes, par sauts, glissantes et sessions à la main, vérifiées par le code.
+- **Ex. 12.9** - Marge d'un filigrane : borne par le quantile des délais contre retardataires réellement écartés.
+- **Ex. 12.10** - Jointure recherches-clics : fenêtre pour 99 % des clics, taille de l'état par la loi de Little, simulation.
+- **Ex. 12.11** - Idempotence par offset, traitement non déterministe et fencing d'une instance zombie (mini-lab).
+- **Ex. 12.12** - Boîte d'envoi au moins une fois et consommateur dédupliquant exactement une fois, taille de la table de déduplication.
 
 ## Labs (Docker)
 
