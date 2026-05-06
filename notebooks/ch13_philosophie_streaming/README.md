@@ -1,0 +1,18 @@
+# Chapitre 13 - Une philosophie des systèmes de flux
+
+Le chapitre 13 rassemble les idées du livre en une philosophie de conception : composer des outils spécialisés en désignant un système de référence et en **dérivant** tout le reste par des flux d'événements, ce qui revient à « dégrouper » la base de données à l'échelle d'une organisation, jusqu'à l'écran de l'utilisateur ; puis obtenir la justesse **de bout en bout** (identifiants de requête, contraintes vérifiées par des journaux, distinction entre ponctualité et intégrité, audit). Le livre argumente sans code ; les notebooks implémentent chaque mécanisme (double écriture contre journal, index construit en ligne, dataflow façon tableur, lectures traitées comme des événements, unicité par journal partagé, virement multi-shard sans validation atomique, arbres de Merkle) et le mesurent par simulation.
+
+Les fonctions réutilisables (journal partitionné, double écriture et divergence, scénario de causalité « retrait d'ami », disponibilité synchrone contre asynchrone, index construit en ligne, couplage lâche, graphe de dataflow incrémental, journal de changements SQLite par déclencheurs, jointure temporelle, index inversé instrumenté, portée d'une URL par diffusion entre shards, virements avec identifiants de requête, sommes de contrôle à chaque couche, unicité par journal, virement multi-shard avec pannes et rejeu, surréservation, inventaire multi-régions, vérification périodique, journal chaîné, arbres de Merkle) sont dans [`ddia/dataflow.py`](../../ddia/dataflow.py), testées par [`tests/test_dataflow.py`](../../tests/test_dataflow.py). Les fonctions du lab (lecture des changements `test_decoding`, vue idempotente) sont dans [`ddia/dataflow_pg.py`](../../ddia/dataflow_pg.py), testées par [`tests/test_dataflow_pg.py`](../../tests/test_dataflow_pg.py).
+
+## Notebooks de cours
+
+| Notebook | Sections du livre | Contenu |
+|---|---|---|
+| [`ch13_cours_1_integration_de_donnees.ipynb`](ch13_cours_1_integration_de_donnees.ipynb) | *Data Integration* : *Combining Specialized Tools by Deriving Data* (*Reasoning about dataflows*, *Derived data versus distributed transactions*, *The limits of total ordering*, *Ordering events to capture causality*), *Batch and Stream Processing* (*Maintaining derived state*, *Reprocessing data for application evolution*, *Unifying batch and stream processing*) | système de référence et données dérivées (diagramme), intégrations point à point contre journal central ; double écriture contre journal (diagramme espace-temps, loi de Laplace et simulation), rejeu déterministe et idempotent ; transaction distribuée contre journal sur trois mois de pannes simulées (refus contre retards) ; entrelacements possibles sans ordre total ; scénario du retrait d'ami (diagramme espace-temps), taux de fuite et coût d'une référence causale explicite ; deux vues dérivées du même journal, bogue de migration et rayon d'impact d'une bascule progressive ; lambda contre kappa (diagramme), fenêtres par temps d'événement contre temps de traitement lors d'un rejeu |
+
+## Labs (Docker)
+
+| Notebook | Système | Contenu |
+|---|---|---|
+
+Démarrer les services avec `docker compose -f docker/dataflow/compose.yml -p ddia_dataflow up -d` (ports 11332 et 11379), puis les arrêter avec `docker compose -f docker/dataflow/compose.yml -p ddia_dataflow down -v`.
