@@ -15,6 +15,13 @@ Les fonctions réutilisables (scores partagés et exclusion, population de créd
 
 | Notebook | Exercices |
 |---|---|
+| [`ch14_exercices_01-06.ipynb`](ch14_exercices_01-06.ipynb) | 14.1 à 14.6 |
 
+- **Ex. 14.1** - Calibration contre égalité des taux d'erreur : identité de Chouldechova, deux groupes aux taux de base différents, simulation de scores calibrés.
+- **Ex. 14.2** - Ré-identification : proportion d'uniques selon la population et la précision de la date, recherche de la généralisation 5-anonyme la moins destructrice.
+- **Ex. 14.3** - Réponse randomisée : estimateur sans biais, taille d'échantillon (facteur 9), rapport de vraisemblance borné, couverture de l'intervalle simulée.
+- **Ex. 14.4** - Boucle de rétroaction des patrouilles : martingale de l'urne de Pólya, emballement au point chaud, correction par pondération inverse, taux inégaux (200 simulations).
+- **Ex. 14.5** - Durée de conservation et risque : volumes, probabilité de fuite indépendante de la durée, agrégats, gouvernements futurs.
+- **Ex. 14.6** - Droit à l'effacement dans un journal immuable : segments touchés, réécriture par lots, crypto-effacement et ses limites (mini-lab).
 
 Pas de lab Docker pour ce chapitre : les notions sont mieux servies par des simulations déterministes sur données synthétiques.
