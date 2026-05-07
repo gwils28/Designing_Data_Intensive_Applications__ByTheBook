@@ -14,6 +14,18 @@ Les fonctions réutilisables (journal partitionné, double écriture et divergen
 | [`ch13_cours_4_bout_en_bout_et_contraintes.ipynb`](ch13_cours_4_bout_en_bout_et_contraintes.ipynb) | *Aiming for Correctness* : *The End-to-End Argument for Databases* (*Exactly-once execution of an operation*, *Duplicate suppression*, *Uniquely identifying requests*, *The end-to-end argument*, *Applying end-to-end thinking in data systems*), *Enforcing Constraints* (*Uniqueness constraints require consensus*, *Uniqueness in log-based messaging*, *Multishard request processing*) | table en place contre journal immuable après un bogue ; COMMIT dont la réponse se perd (diagramme espace-temps), virements relancés avec et sans identifiant (SQLite) ; contrainte UNIQUE sur les identifiants de requête, paradoxe des anniversaires ; sommes de contrôle par lien, par bloc et de bout en bout (diagramme, matrice de détection) ; doublons de la réplication multi-leader, unicité par journal shardé (diagramme espace-temps), débit et clé chaude ; virement multi-shard sans validation atomique (diagramme), pannes injectées et conservation de l'argent |
 | [`ch13_cours_5_integrite_et_audit.ipynb`](ch13_cours_5_integrite_et_audit.ipynb) | *Timeliness and Integrity* (*Correctness of dataflow systems*, *Loosely interpreted constraints*, *Coordination-avoiding data systems*), *Trust, but Verify* (*Maintaining integrity in the face of software bugs*, *Don't just blindly trust what they promise*, *Designing for auditability*, *The end-to-end argument again*, *Tools for auditable data systems*) | ponctualité (violation qui s'efface) contre intégrité (violation qui s'accumule) ; surréservation optimale selon l'indemnité ; inventaire multi-régions : excuses pour incohérence contre excuses pour indisponibilité, compromis ; corruptions silencieuses à grande échelle, vérification périodique des répliques (formule et simulation) ; journal chaîné par hachage, dérivation redondante, datation d'un bogue par rejeu ; arbre de Merkle (diagramme), preuves d'inclusion, comparaison de répliques |
 
+## Notebooks d'exercices
+
+| Notebook | Exercices |
+|---|---|
+| [`ch13_exercices_01-05.ipynb`](ch13_exercices_01-05.ipynb) | 13.1 à 13.5 |
+
+- **Ex. 13.1** - Double écriture : probabilité de divergence (loi de Laplace), clés divergentes par jour, horodatages client et écritures perdues.
+- **Ex. 13.2** - Saturation d'un leader unique, fuite causale entre journaux et attente moyenne d'une référence explicite, limites des horodatages de Lamport.
+- **Ex. 13.3** - Bascule progressive ou d'un coup : délai d'alerte et lectures fausses servies (calcul et simulation).
+- **Ex. 13.4** - Rejouer deux ans d'historique : stockage, temps de rattrapage, parallélisme nécessaire, journal compacté.
+- **Ex. 13.5** - Cache de requêtes fréquentes sous une loi de Zipf : taux de succès, taille optimale proportionnelle au rapport lectures/écritures, lien avec les timelines.
+
 ## Labs (Docker)
 
 | Notebook | Système | Contenu |
