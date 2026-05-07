@@ -19,12 +19,18 @@ Les fonctions réutilisables (journal partitionné, double écriture et divergen
 | Notebook | Exercices |
 |---|---|
 | [`ch13_exercices_01-05.ipynb`](ch13_exercices_01-05.ipynb) | 13.1 à 13.5 |
+| [`ch13_exercices_06-10.ipynb`](ch13_exercices_06-10.ipynb) | 13.6 à 13.10 |
 
 - **Ex. 13.1** - Double écriture : probabilité de divergence (loi de Laplace), clés divergentes par jour, horodatages client et écritures perdues.
 - **Ex. 13.2** - Saturation d'un leader unique, fuite causale entre journaux et attente moyenne d'une référence explicite, limites des horodatages de Lamport.
 - **Ex. 13.3** - Bascule progressive ou d'un coup : délai d'alerte et lectures fausses servies (calcul et simulation).
 - **Ex. 13.4** - Rejouer deux ans d'historique : stockage, temps de rattrapage, parallélisme nécessaire, journal compacté.
 - **Ex. 13.5** - Cache de requêtes fréquentes sous une loi de Zipf : taux de succès, taille optimale proportionnelle au rapport lectures/écritures, lien avec les timelines.
+- **Ex. 13.6** - Identifiants de requête : exécutions en trop, collisions sur 64 et 122 bits, faux doublons d'un hachage des champs.
+- **Ex. 13.7** - Deux contraintes d'unicité (nom et e-mail) sans transaction : réservation, confirmation, compensation (mini-lab).
+- **Ex. 13.8** - Virement multi-shard : panne injectée à chaque étape et chaque point, comparaison avec la validation en deux phases.
+- **Ex. 13.9** - Surréservation : raisonnement marginal, nombre optimal de billets en trop, contrainte souple.
+- **Ex. 13.10** - Arbre de Merkle : comparer deux répliques en $O(k \log(n/k))$, taille des preuves d'inclusion.
 
 ## Labs (Docker)
 
