@@ -98,7 +98,7 @@ Lancer les tests : `pytest tests/`.
 | 11 | [Traitement par lots](notebooks/ch11_traitement_par_lots) | ✅ |
 | 12 | [Traitement de flux](notebooks/ch12_traitement_de_flux) | ✅ |
 | 13 | [Une philosophie des systèmes de streaming](notebooks/ch13_philosophie_streaming) | 🚧 |
-| 14 | Faire ce qui est juste | 🚧 |
+| 14 | [Faire ce qui est juste](notebooks/ch14_faire_ce_qui_est_juste) | 🚧 |
 
 ## Labs Docker
 
